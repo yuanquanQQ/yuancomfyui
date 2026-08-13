@@ -1,0 +1,41 @@
+# Local environments and runtime state
+.venv/
+.venv-local/
+.runtime/
+__pycache__/
+*.py[cod]
+
+# Local secrets and account sessions
+.env
+profiles/
+*.state.json
+state.json
+login_status.json
+login_failure.*
+login_view.png
+login_command.json
+login_inputs/
+
+# User media and generated results
+data/
+uploads/
+outputs/
+*.mp4
+*.mov
+*.webm
+*.avi
+*.mkv
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+*.log
+
+# Local document QA renders
+docs/requirement_report_render/
