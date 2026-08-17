@@ -6,6 +6,14 @@ rem ============================================================
 
 cd /d "%~dp0"
 
+set "APP_PYTHON=%~dp0.venv\Scripts\python.exe"
+if not exist "%APP_PYTHON%" set "APP_PYTHON=%~dp0.venv-local\Scripts\python.exe"
+if not exist "%APP_PYTHON%" (
+  echo   ERROR: Python environment is missing. Run setup.bat first.
+  pause
+  exit /b 1
+)
+
 echo.
 echo ============================================
 echo   [1/4] Checking icon...
@@ -29,7 +37,7 @@ echo ============================================
 echo   [3/4] PyInstaller packaging (1-2 min)...
 echo ============================================
 set PYTHONIOENCODING=utf-8
-python -m PyInstaller yuncomfyui.spec --clean --noconfirm
+"%APP_PYTHON%" -m PyInstaller yuncomfyui.spec --clean --noconfirm
 if %ERRORLEVEL% NEQ 0 (
   echo.
   echo   *** PACKAGE FAILED ***

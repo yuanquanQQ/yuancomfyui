@@ -1,0 +1,4 @@
+pywebview==5.4
+requests==2.32.4
+pyperclip==1.9.0
+pyinstaller==6.15.0

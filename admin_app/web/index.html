@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YunComfyUI 授权管理</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="toast" class="toast" role="status"></div>
+
+  <section id="login-view" class="login-shell">
+    <form id="login-form" class="login-panel">
+      <div class="brand-mark">YC</div>
+      <h1>授权管理</h1>
+      <p>YunComfyUI License Console</p>
+      <label>服务器地址<input id="server-url" type="url" placeholder="https://license.example.com" required></label>
+      <label>管理员账号<input id="username" autocomplete="username" value="admin" required></label>
+      <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+      <button class="primary wide" type="submit">登录</button>
+      <div id="login-error" class="form-error"></div>
+    </form>
+  </section>
+
+  <div id="app-view" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark small">YC</span><div><strong>YunComfyUI</strong><small>授权管理</small></div></div>
+      <nav id="navigation">
+        <button class="nav-item active" data-page="dashboard">概览</button>
+        <button class="nav-item" data-page="generate">生成卡密</button>
+        <button class="nav-item" data-page="cards">卡密管理</button>
+        <button class="nav-item" data-page="licenses">授权与设备</button>
+        <button class="nav-item" data-page="logs">操作日志</button>
+        <button class="nav-item" data-page="settings">设置</button>
+      </nav>
+      <div class="sidebar-bottom"><span id="server-label"></span><button id="logout-button" class="text-button">退出登录</button></div>
+    </aside>
+
+    <main class="main-content">
+      <section class="page active" id="page-dashboard">
+        <header><div><h2>概览</h2><p>授权服务当前状态</p></div><button class="icon-button" data-refresh="dashboard" title="刷新">↻</button></header>
+        <div class="stats-grid">
+          <article><span>未使用卡密</span><strong id="stat-unused">--</strong></article>
+          <article><span>有效授权</span><strong id="stat-active">--</strong></article>
+          <article><span>7天内到期</span><strong id="stat-expiring">--</strong></article>
+          <article><span>在线设备记录</span><strong id="stat-devices">--</strong></article>
+        </div>
+        <div class="info-band"><strong>校验策略</strong><span>客户端每 12 小时联网校验，默认允许 72 小时离线宽限。授权到期或禁用后停止创建新任务。</span></div>
+      </section>
+
+      <section class="page" id="page-generate">
+        <header><div><h2>生成卡密</h2><p>卡密明文仅在本次生成后展示，请立即交付或导出</p></div></header>
+        <form id="generate-form" class="form-grid panel">
+          <label>套餐<select id="plan-type"><option value="monthly">月卡 · 30天</option><option value="quarterly">季卡 · 90天</option><option value="yearly">年卡 · 365天</option><option value="permanent">永久卡</option><option value="custom">自定义</option></select></label>
+          <label id="custom-days-field" class="hidden">自定义天数<input id="duration-days" type="number" min="1" max="36500" value="30"></label>
+          <label>生成数量<input id="card-count" type="number" min="1" max="500" value="1"></label>
+          <label>设备上限<input id="device-limit" type="number" min="1" max="20" value="1"></label>
+          <label>离线宽限（小时）<input id="grace-hours" type="number" min="0" max="720" value="72"></label>
+          <label>销售渠道<input id="channel" maxlength="80" placeholder="例如：微信"></label>
+          <label class="full">备注<textarea id="card-notes" maxlength="1000" rows="3"></textarea></label>
+          <div class="full actions"><button class="primary" type="submit">生成卡密</button></div>
+        </form>
+        <section id="generated-panel" class="panel generated hidden">
+          <div class="panel-heading"><div><strong>生成结果</strong><span id="batch-label"></span></div><div class="actions"><button id="copy-codes">复制全部</button><button id="export-codes">导出 CSV</button></div></div>
+          <textarea id="generated-codes" readonly></textarea>
+        </section>
+      </section>
+
+      <section class="page" id="page-cards">
+        <header><div><h2>卡密管理</h2><p>数据库仅保存摘要，无法找回完整卡密</p></div></header>
+        <div class="toolbar"><input id="card-search" placeholder="搜索尾号、批次或渠道"><select id="card-status"><option value="">全部状态</option><option value="unused">未使用</option><option value="used">已使用</option><option value="disabled">已禁用</option><option value="void">已作废</option></select><button id="refresh-cards">查询</button></div>
+        <div class="table-wrap"><table><thead><tr><th>卡密标识</th><th>套餐</th><th>状态</th><th>渠道</th><th>创建时间</th><th>使用时间</th><th>操作</th></tr></thead><tbody id="cards-body"></tbody></table></div>
+      </section>
+
+      <section class="page" id="page-licenses">
+        <header><div><h2>授权与设备</h2><p>控制有效期、停用状态及换机绑定</p></div></header>
+        <div class="toolbar"><input id="license-search" placeholder="搜索授权 ID"><select id="license-status"><option value="">全部状态</option><option value="active">有效</option><option value="disabled">已禁用</option><option value="expired">已到期</option></select><button id="refresh-licenses">查询</button></div>
+        <div id="licenses-list" class="license-list"></div>
+      </section>
+
+      <section class="page" id="page-logs">
+        <header><div><h2>操作日志</h2><p>管理员操作及客户端关键校验记录</p></div><button class="icon-button" data-refresh="logs" title="刷新">↻</button></header>
+        <div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>目标</th><th>来源 IP</th><th>详情</th></tr></thead><tbody id="logs-body"></tbody></table></div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <header><div><h2>设置</h2><p>修改当前管理员账号的登录密码</p></div></header>
+        <form id="password-form" class="panel form-grid compact-form">
+          <label>当前密码<input id="current-password" type="password" autocomplete="current-password" required></label>
+          <label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" required></label>
+          <label>确认新密码<input id="confirm-password" type="password" autocomplete="new-password" minlength="12" required></label>
+          <div class="full actions"><button class="primary" type="submit">修改密码</button></div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="action-dialog">
+    <form method="dialog" id="action-form">
+      <h3 id="action-title">授权操作</h3>
+      <input type="hidden" id="action-license-id">
+      <input type="hidden" id="action-name">
+      <label id="action-days-field">延长天数<input id="action-days" type="number" min="1" max="36500" value="30"></label>
+      <label>备注<textarea id="action-note" rows="3"></textarea></label>
+      <div class="actions"><button value="cancel">取消</button><button id="action-confirm" class="primary" value="default">确认</button></div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

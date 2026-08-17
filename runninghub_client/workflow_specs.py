@@ -96,9 +96,160 @@ PERSON_REPLACE_SPEC = WorkflowSpec(
     strict_outputs=True,
 )
 
+OOTD_7DAY_SPEC = WorkflowSpec(
+    name="ootd_7day",
+    uploads=(
+        UploadSpec("day1", "6557", "upload", "第 1 天图片", "image"),
+        UploadSpec("day2", "6798", "upload", "第 2 天图片", "image"),
+        UploadSpec("day3", "6851", "upload", "第 3 天图片", "image"),
+        UploadSpec("day4", "7110", "upload", "第 4 天图片", "image"),
+        UploadSpec("day5", "7170", "upload", "第 5 天图片", "image"),
+        UploadSpec("day6", "7786", "upload", "第 6 天图片", "image"),
+        UploadSpec("day7", "7852", "upload", "第 7 天图片", "image"),
+        UploadSpec("audio", "6726", "upload", "背景音乐", "audio"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="6223",
+            menu_actions=("save video", "save preview"),
+            media_type="video",
+        ),
+    ),
+    strict_outputs=True,
+)
+
+QWEN_TRYON_SPEC = WorkflowSpec(
+    name="qwen_tryon",
+    uploads=(
+        UploadSpec("person", "23", "upload", "人物图片", "image"),
+        UploadSpec("garment", "24", "upload", "衣服图片", "image"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="37",
+            menu_actions=("save image", "save preview"),
+            media_type="image",
+        ),
+    ),
+    strict_outputs=True,
+)
+
+HD_RESTORE_SPEC = WorkflowSpec(
+    name="hd_restore",
+    uploads=(
+        UploadSpec("image", "105", "upload", "待修复图片", "image"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="149",
+            menu_actions=("save image", "save preview"),
+            media_type="image",
+        ),
+    ),
+    completion=CompletionSpec(
+        markers=("显示报告", "Show Report"),
+        minimum_run_seconds=0,
+    ),
+    strict_outputs=True,
+)
+
+ANIMATE_TRANSFER_SPEC = WorkflowSpec(
+    name="animate_transfer",
+    uploads=(
+        UploadSpec(
+            "motion_video", "275", "choose video to upload",
+            "动作视频", "video",
+        ),
+        UploadSpec("reference_image", "299", "upload", "人物参考图", "image"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="500",
+            menu_actions=("save video", "save preview"),
+            media_type="video",
+        ),
+    ),
+    strict_outputs=True,
+)
+
+QWEN_PROMPT_IMAGE_SPEC = WorkflowSpec(
+    name="qwen_prompt_image",
+    uploads=(
+        UploadSpec("reference", "100", "upload", "参考图片", "image"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="158",
+            menu_actions=("save image", "save preview"),
+            media_type="image",
+        ),
+    ),
+    strict_outputs=True,
+)
+
+SCAIL_MULTI_REFERENCE_SPEC = WorkflowSpec(
+    name="scail_multi_reference",
+    uploads=(
+        UploadSpec(
+            "motion_video", "214", "choose video to upload",
+            "动作视频", "video",
+        ),
+        UploadSpec("reference1", "1166", "upload", "参考图 1", "image"),
+        UploadSpec("reference2", "1244", "upload", "参考图 2", "image"),
+        UploadSpec("reference3", "1336", "upload", "参考图 3", "image"),
+        UploadSpec("reference4", "1337", "upload", "参考图 4", "image"),
+        UploadSpec("reference5", "1338", "upload", "参考图 5", "image"),
+        UploadSpec("reference6", "1339", "upload", "参考图 6", "image"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="161",
+            menu_actions=("save video", "save preview"),
+            media_type="video",
+        ),
+    ),
+    strict_outputs=True,
+)
+
+SCAIL_SEVEN_OUTFIT_SPEC = WorkflowSpec(
+    name="scail_seven_outfit",
+    uploads=(
+        UploadSpec(
+            "motion_video", "33", "choose video to upload",
+            "动作视频", "video",
+        ),
+        UploadSpec("outfit1", "30", "upload", "第 1 段贴图", "image"),
+        UploadSpec("outfit2", "248", "upload", "第 2 段贴图", "image"),
+        UploadSpec("outfit3", "461", "upload", "第 3 段贴图", "image"),
+        UploadSpec("outfit4", "462", "upload", "第 4 段贴图", "image"),
+        UploadSpec("outfit5", "464", "upload", "第 5 段贴图", "image"),
+        UploadSpec("outfit6", "465", "upload", "第 6 段贴图", "image"),
+        UploadSpec("outfit7", "466", "upload", "第 7 段贴图", "image"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="670",
+            menu_actions=("save video", "save preview"),
+            media_type="video",
+        ),
+    ),
+    completion=CompletionSpec(
+        markers=("显示报告", "Show Report"),
+        minimum_run_seconds=0,
+    ),
+    strict_outputs=True,
+)
+
 WORKFLOW_SPECS = {
     ACTION_TRANSFER_SPEC.name: ACTION_TRANSFER_SPEC,
     PERSON_REPLACE_SPEC.name: PERSON_REPLACE_SPEC,
+    OOTD_7DAY_SPEC.name: OOTD_7DAY_SPEC,
+    QWEN_TRYON_SPEC.name: QWEN_TRYON_SPEC,
+    HD_RESTORE_SPEC.name: HD_RESTORE_SPEC,
+    ANIMATE_TRANSFER_SPEC.name: ANIMATE_TRANSFER_SPEC,
+    QWEN_PROMPT_IMAGE_SPEC.name: QWEN_PROMPT_IMAGE_SPEC,
+    SCAIL_MULTI_REFERENCE_SPEC.name: SCAIL_MULTI_REFERENCE_SPEC,
+    SCAIL_SEVEN_OUTFIT_SPEC.name: SCAIL_SEVEN_OUTFIT_SPEC,
 }
 
 

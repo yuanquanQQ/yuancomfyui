@@ -39,3 +39,11 @@ dist/
 
 # Local document QA renders
 docs/requirement_report_render/
+
+# License service secrets and generated administrator builds
+license_server/backups/
+license_server/secrets/
+admin_app/*.csv
+.license/
+license_server/.env.local
+license_server/local_data/

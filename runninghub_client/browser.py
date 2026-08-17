@@ -613,43 +613,57 @@ class BrowserRunner:
         """Upload file via Playwright APIRequestContext (shares browser cookies),
         then call widget.callback(filename) to update node state."""
         fp = Path(file_path)
-        is_video = fp.suffix.lower() in (".mp4", ".mov", ".webm", ".avi", ".mkv")
-        field_name = "video" if is_video else "image"
-        mime = "video/mp4" if is_video else "image/png"
+        suffix = fp.suffix.lower()
+        is_video = suffix in (".mp4", ".mov", ".webm", ".avi", ".mkv")
+        is_audio = suffix in (".mp3", ".wav", ".m4a", ".aac", ".flac")
+        mime = (
+            "video/mp4" if is_video
+            else "audio/mpeg" if suffix == ".mp3"
+            else "audio/wav" if suffix == ".wav"
+            else "audio/mp4" if suffix == ".m4a"
+            else "audio/aac" if suffix == ".aac"
+            else "audio/flac" if suffix == ".flac"
+            else "image/png"
+        )
+        if is_video:
+            upload_targets = (("video", "/upload/video"), ("image", "/upload/image"))
+        elif is_audio:
+            upload_targets = (("audio", "/upload/audio"), ("image", "/upload/image"))
+        else:
+            upload_targets = (("image", "/upload/image"),)
 
         # Determine full URL (ComfyUI is in iframe on runninghub.cn)
         base = "https://www.runninghub.cn"
-        endpoint = f"{base}/upload/video" if is_video else f"{base}/upload/image"
 
         raw = fp.read_bytes()
-        logger.info("  Upload via APIRequest: %d bytes -> %s field=%s", len(raw), endpoint, field_name)
+        data = None
+        last_error = None
 
         # Use Playwright's APIRequestContext — shares cookies with browser
-        try:
-            response = self._page.request.post(
-                endpoint,
-                multipart={field_name: (fp.name, raw, mime)},
-                timeout=60000,
+        for field_name, endpoint_path in upload_targets:
+            endpoint = f"{base}{endpoint_path}"
+            logger.info(
+                "  Upload via APIRequest: %d bytes -> %s field=%s",
+                len(raw), endpoint, field_name,
             )
-            logger.info("  HTTP %d: %s", response.status, response.text()[:200])
-            if response.status != 200:
-                raise RuntimeError(f"Upload HTTP {response.status}: {response.text()[:200]}")
-            data = response.json()
-        except Exception as exc:
-            # Fallback: try /upload/image for videos too (some ComfyUI versions)
-            if is_video:
-                logger.info("  Retry with /upload/image...")
+            try:
                 response = self._page.request.post(
-                    f"{base}/upload/image",
-                    multipart={"image": (fp.name, raw, mime)},
+                    endpoint,
+                    multipart={field_name: (fp.name, raw, mime)},
                     timeout=60000,
                 )
                 logger.info("  HTTP %d: %s", response.status, response.text()[:200])
                 if response.status != 200:
-                    raise RuntimeError(f"Upload HTTP {response.status}") from exc
+                    raise RuntimeError(
+                        f"Upload HTTP {response.status}: {response.text()[:200]}"
+                    )
                 data = response.json()
-            else:
-                raise
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.info("  Upload target failed, trying fallback: %s", str(exc)[:120])
+        if data is None:
+            raise RuntimeError("All direct upload endpoints failed") from last_error
 
         if isinstance(data, str):
             fname = data

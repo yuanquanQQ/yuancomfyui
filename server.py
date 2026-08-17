@@ -21,8 +21,18 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from license_client import LicenseError, LicenseManager
 from runninghub_client.browser import BrowserRunner
-from runninghub_client.workflow_specs import PERSON_REPLACE_SPEC
+from runninghub_client.workflow_specs import (
+    ANIMATE_TRANSFER_SPEC,
+    HD_RESTORE_SPEC,
+    OOTD_7DAY_SPEC,
+    PERSON_REPLACE_SPEC,
+    QWEN_PROMPT_IMAGE_SPEC,
+    QWEN_TRYON_SPEC,
+    SCAIL_MULTI_REFERENCE_SPEC,
+    SCAIL_SEVEN_OUTFIT_SPEC,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +52,12 @@ else:
     BUNDLE_ROOT = Path(__file__).resolve().parent
     APP_ROOT = BUNDLE_ROOT
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(APP_ROOT / ".env", override=False)
+except ImportError:
+    pass
+
 ROOT = APP_ROOT  # legacy alias used throughout
 DATA = APP_ROOT / "data"
 UPLOADS = APP_ROOT / "uploads"
@@ -50,17 +66,176 @@ STATIC = BUNDLE_ROOT / "static"
 PORT = 8080
 MAX_WORKERS = 10
 LOGIN_WORKERS = 2
-DEFAULT_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_WORKFLOW_ID", "2087484658098462722"
+PERSON_REPLACE_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_WORKFLOW_ID", "2087970301203279874"
 ).strip()
-DEFAULT_WORKFLOW_SPEC = PERSON_REPLACE_SPEC
-DEFAULT_WORKFLOW_NAME = "人物替换"
+OOTD_7DAY_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_OOTD_WORKFLOW_ID", ""
+).strip()
+QWEN_TRYON_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_QWEN_TRYON_WORKFLOW_ID", ""
+).strip()
+HD_RESTORE_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_HD_RESTORE_WORKFLOW_ID", ""
+).strip()
+ANIMATE_TRANSFER_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_ANIMATE_TRANSFER_WORKFLOW_ID", ""
+).strip()
+QWEN_PROMPT_IMAGE_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_QWEN_PROMPT_IMAGE_WORKFLOW_ID", ""
+).strip()
+SCAIL_MULTI_REFERENCE_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_SCAIL_MULTI_REFERENCE_WORKFLOW_ID", ""
+).strip()
+SCAIL_SEVEN_OUTFIT_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_SCAIL_SEVEN_OUTFIT_WORKFLOW_ID", ""
+).strip()
 WORKFLOW_TIMEOUT_SECONDS = int(os.environ.get("WORKFLOW_TIMEOUT_SECONDS", "3000"))
+OOTD_WORKFLOW_TIMEOUT_SECONDS = int(os.environ.get(
+    "OOTD_WORKFLOW_TIMEOUT_SECONDS", "7200"
+))
+QUEUE_TIMEOUT_SECONDS = int(os.environ.get("QUEUE_TIMEOUT_SECONDS", "86400"))
 MAX_TASK_REQUEUES = int(os.environ.get("MAX_TASK_REQUEUES", "2"))
+
+DEFAULT_WORKFLOW_KEY = "person_replace"
+WORKFLOWS = {
+    "person_replace": {
+        "key": "person_replace",
+        "name": "人物替换",
+        "description": "参考人物与动作视频生成",
+        "category": "video",
+        "workflow_id": PERSON_REPLACE_WORKFLOW_ID,
+        "spec": PERSON_REPLACE_SPEC,
+        "timeout": WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "model",
+        "inputs": (
+            {"key": "video", "label": "动作视频", "media_type": "video"},
+            {"key": "model", "label": "人物参考图", "media_type": "image"},
+        ),
+    },
+    "ootd_7day": {
+        "key": "ootd_7day",
+        "name": "OOTD 7天变装",
+        "description": "7 张穿搭图片生成并合成长视频",
+        "category": "video",
+        "workflow_id": OOTD_7DAY_WORKFLOW_ID,
+        "spec": OOTD_7DAY_SPEC,
+        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "day1",
+        "inputs": tuple(
+            {"key": f"day{day}", "label": f"第 {day} 天图片", "media_type": "image"}
+            for day in range(1, 8)
+        ) + (
+            {"key": "audio", "label": "背景音乐", "media_type": "audio"},
+        ),
+    },
+    "qwen_tryon": {
+        "key": "qwen_tryon",
+        "name": "一键换衣 · 千问版",
+        "description": "上传人物图和衣服图，只替换人物服装",
+        "category": "image",
+        "workflow_id": QWEN_TRYON_WORKFLOW_ID,
+        "spec": QWEN_TRYON_SPEC,
+        "timeout": WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "person",
+        "inputs": (
+            {"key": "person", "label": "人物图片", "media_type": "image"},
+            {"key": "garment", "label": "衣服图片", "media_type": "image"},
+        ),
+    },
+    "hd_restore": {
+        "key": "hd_restore",
+        "name": "高定版高清修复",
+        "description": "去除 AI 感并增强图片细节",
+        "category": "image",
+        "workflow_id": HD_RESTORE_WORKFLOW_ID,
+        "spec": HD_RESTORE_SPEC,
+        "timeout": WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "image",
+        "inputs": (
+            {"key": "image", "label": "待修复图片", "media_type": "image"},
+        ),
+    },
+    "animate_transfer": {
+        "key": "animate_transfer",
+        "name": "Animate 动作迁移 ProMax",
+        "description": "根据动作视频驱动人物并自动匹配尺寸",
+        "category": "video",
+        "workflow_id": ANIMATE_TRANSFER_WORKFLOW_ID,
+        "spec": ANIMATE_TRANSFER_SPEC,
+        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "reference_image",
+        "inputs": (
+            {"key": "motion_video", "label": "动作视频", "media_type": "video"},
+            {"key": "reference_image", "label": "人物参考图", "media_type": "image"},
+        ),
+    },
+    "qwen_prompt_image": {
+        "key": "qwen_prompt_image",
+        "name": "Qwen3 反推提示词 + Z-Image",
+        "description": "从参考图反推提示词并重新生成高清图片",
+        "category": "image",
+        "workflow_id": QWEN_PROMPT_IMAGE_WORKFLOW_ID,
+        "spec": QWEN_PROMPT_IMAGE_SPEC,
+        "timeout": WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "reference",
+        "inputs": (
+            {"key": "reference", "label": "参考图片", "media_type": "image"},
+        ),
+    },
+    "scail_multi_reference": {
+        "key": "scail_multi_reference",
+        "name": "极境 SCAIL2 动作迁移（多参考）",
+        "description": "使用动作视频和 6 张人物参考图生成动作迁移视频",
+        "category": "video",
+        "workflow_id": SCAIL_MULTI_REFERENCE_WORKFLOW_ID,
+        "spec": SCAIL_MULTI_REFERENCE_SPEC,
+        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "reference1",
+        "inputs": (
+            {"key": "motion_video", "label": "动作视频", "media_type": "video"},
+            {"key": "reference1", "label": "参考图 1", "media_type": "image"},
+            {"key": "reference2", "label": "参考图 2", "media_type": "image"},
+            {"key": "reference3", "label": "参考图 3", "media_type": "image"},
+            {"key": "reference4", "label": "参考图 4", "media_type": "image"},
+            {"key": "reference5", "label": "参考图 5", "media_type": "image"},
+            {"key": "reference6", "label": "参考图 6", "media_type": "image"},
+        ),
+    },
+    "scail_seven_outfit": {
+        "key": "scail_seven_outfit",
+        "name": "SCAIL 2 七段贴图换装",
+        "description": "使用动作视频和 7 张服装贴图生成七段换装视频",
+        "category": "video",
+        "workflow_id": SCAIL_SEVEN_OUTFIT_WORKFLOW_ID,
+        "spec": SCAIL_SEVEN_OUTFIT_SPEC,
+        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "outfit1",
+        "inputs": (
+            {"key": "motion_video", "label": "动作视频", "media_type": "video"},
+            {"key": "outfit1", "label": "第 1 段贴图", "media_type": "image"},
+            {"key": "outfit2", "label": "第 2 段贴图", "media_type": "image"},
+            {"key": "outfit3", "label": "第 3 段贴图", "media_type": "image"},
+            {"key": "outfit4", "label": "第 4 段贴图", "media_type": "image"},
+            {"key": "outfit5", "label": "第 5 段贴图", "media_type": "image"},
+            {"key": "outfit6", "label": "第 6 段贴图", "media_type": "image"},
+            {"key": "outfit7", "label": "第 7 段贴图", "media_type": "image"},
+        ),
+    },
+}
+
+DEFAULT_WORKFLOW_ID = PERSON_REPLACE_WORKFLOW_ID
+DEFAULT_WORKFLOW_SPEC = PERSON_REPLACE_SPEC
+DEFAULT_WORKFLOW_NAME = WORKFLOWS[DEFAULT_WORKFLOW_KEY]["name"]
 
 # ---- Ensure required directories exist ----------------------------------
 for _dir in (DATA / "pic", DATA / "ple", DATA / "video", UPLOADS, PROFILES, APP_ROOT / "outputs"):
     _dir.mkdir(parents=True, exist_ok=True)
+
+LICENSE = LicenseManager(
+    APP_ROOT / ".license",
+    os.environ.get("LICENSE_SERVER_URL", "http://127.0.0.1:8088"),
+)
 
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="runner")
 _login_executor = ThreadPoolExecutor(max_workers=LOGIN_WORKERS, thread_name_prefix="login")
@@ -88,6 +263,11 @@ MIME_TYPES = {
     ".gif": "image/gif",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".flac": "audio/flac",
 }
 
 
@@ -210,6 +390,32 @@ def _validate_workflow_id(value: str) -> str:
     if not workflow_id or not re.fullmatch(r"\d{6,30}", workflow_id):
         raise ValueError("Workflow ID 应为 6–30 位数字")
     return workflow_id
+
+
+def _workflow_config(key: str | None, require_configured=True) -> dict:
+    workflow_key = str(key or DEFAULT_WORKFLOW_KEY).strip()
+    workflow = WORKFLOWS.get(workflow_key)
+    if not workflow:
+        raise ValueError("未知的工作流")
+    if require_configured and not workflow["workflow_id"]:
+        raise ValueError(
+            f"{workflow['name']} 尚未配置 RunningHub Workflow ID"
+        )
+    return workflow
+
+
+def _public_workflows() -> list[dict]:
+    return [
+        {
+            "key": workflow["key"],
+            "name": workflow["name"],
+            "description": workflow["description"],
+            "category": workflow["category"],
+            "configured": bool(workflow["workflow_id"]),
+            "inputs": list(workflow["inputs"]),
+        }
+        for workflow in WORKFLOWS.values()
+    ]
 
 
 def _session_info(state_path: Path) -> dict:
@@ -411,6 +617,56 @@ def _resolve_uploaded_material(value: str | None, required=True) -> str | None:
     return str(path)
 
 
+def _resolve_workflow_inputs(workflow: dict, data: dict) -> dict[str, str]:
+    resolved = {}
+    for input_spec in workflow["inputs"]:
+        key = input_spec["key"]
+        try:
+            resolved[key] = _resolve_uploaded_material(data.get(key))
+        except ValueError as exc:
+            raise ValueError(f"{input_spec['label']}：{exc}") from exc
+    return resolved
+
+
+def _new_task(
+    workflow: dict,
+    input_paths: dict[str, str],
+    requested_account: str,
+    now: float | None = None,
+) -> dict:
+    created_at = now if now is not None else time.time()
+    task_id = f"task_{int(created_at * 1000)}_{uuid.uuid4().hex[:6]}"
+    input_files = {
+        key: Path(path).name for key, path in input_paths.items()
+    }
+    primary_key = workflow["primary_input"]
+    task = {
+        "task_id": task_id,
+        "workflow_key": workflow["key"],
+        "workflow_name": workflow["name"],
+        "task_name": input_files.get(primary_key) or workflow["name"],
+        "status": "queued",
+        "requested_account": requested_account,
+        "account": None,
+        "phone": None,
+        "workflow_id": None,
+        "input_files": input_files,
+        "input_paths": dict(input_paths),
+        "created_at": created_at,
+        "started_at": None,
+        "completed_at": None,
+        "stage": "queued",
+        "stage_detail": "等待可用账号",
+        "heartbeat_at": created_at,
+        "files": [],
+        "error": None,
+    }
+    for legacy_key in ("video", "model", "clothing"):
+        task[legacy_key] = input_files.get(legacy_key)
+        task[f"{legacy_key}_path"] = input_paths.get(legacy_key)
+    return task
+
+
 def _parse_multipart_file(headers, body: bytes):
     content_type = headers.get("Content-Type", "")
     if "multipart/form-data" not in content_type:
@@ -440,13 +696,14 @@ def _update_task_progress(task_id: str, stage: str, detail: str):
 def _run_task(task_id: str, account: str) -> dict:
     with _tasks_lock:
         task = dict(_tasks[task_id])
+    workflow = _workflow_config(task.get("workflow_key"))
     logger.info("[%s] Running on account=%s workflow=%s", task_id, account,
                 task["workflow_id"])
     try:
         runner = BrowserRunner(
             slow_mo=200,
             workflow_id=task["workflow_id"],
-            workflow_spec=DEFAULT_WORKFLOW_SPEC,
+            workflow_spec=workflow["spec"],
             user_data_dir=str(PROFILES / account),
             progress_callback=lambda stage, detail: _update_task_progress(
                 task_id, stage, detail),
@@ -456,13 +713,10 @@ def _run_task(task_id: str, account: str) -> dict:
             if task_id in _tasks:
                 _tasks[task_id]["runner"] = runner
         result = runner.run(
-            inputs={
-                "video": task["video_path"],
-                "model": task["model_path"],
-            },
+            inputs=task["input_paths"],
             mode="plus",
             output_dir=task["output_dir"],
-            timeout=WORKFLOW_TIMEOUT_SECONDS,
+            timeout=workflow["timeout"],
         )
         files = [str(Path(f).relative_to(ROOT)).replace("\\", "/") for f in (result or [])]
         if not files:
@@ -514,9 +768,10 @@ def _finish_task(task_id: str, account: str, future: Future):
                 new_task_id = f"task_{int(now * 1000)}_{uuid.uuid4().hex[:6]}"
                 new_task = {
                     **{k: v for k, v in task.items()
-                       if k in ("video", "model", "clothing", "video_path",
-                                "model_path", "clothing_path",
-                                "requested_account", "workflow_id")},
+                       if k in ("workflow_key", "workflow_name", "task_name",
+                                "input_files", "input_paths", "video", "model",
+                                "clothing", "video_path", "model_path",
+                                "clothing_path", "requested_account")},
                     "task_id": new_task_id,
                     "status": "queued",
                     "stage": "queued",
@@ -549,11 +804,24 @@ def _finish_task(task_id: str, account: str, future: Future):
 
 
 def _expire_queued_tasks(now=None):
-    """Remove stale queue entries (tasks that no longer exist or changed status)."""
+    """Remove invalid queue entries and fail tasks that waited too long."""
+    now = now or time.time()
     for task_id in list(_task_queue):
         task = _tasks.get(task_id)
         if not task or task.get("status") != "queued":
             _task_queue.remove(task_id)
+            continue
+        if now - task.get("created_at", now) < QUEUE_TIMEOUT_SECONDS:
+            continue
+        task.update({
+            "status": "failed",
+            "stage": "failed",
+            "stage_detail": "排队超时",
+            "heartbeat_at": now,
+            "completed_at": now,
+            "error": f"任务排队超过 {QUEUE_TIMEOUT_SECONDS} 秒",
+        })
+        _task_queue.remove(task_id)
 
 
 def _dispatch_tasks():
@@ -584,11 +852,12 @@ def _dispatch_tasks():
             _task_queue.remove(task_id)
             _account_busy.add(account)
             cfg = _read_json(PROFILES / account / "config.json", {})
+            workflow = _workflow_config(task.get("workflow_key"))
             task.update({
                 "status": "running",
                 "account": account,
                 "phone": cfg.get("phone") or account,
-                "workflow_id": DEFAULT_WORKFLOW_ID,
+                "workflow_id": workflow["workflow_id"],
                 "started_at": time.time(),
                 "stage": "starting",
                 "stage_detail": "等待执行线程启动",
@@ -620,7 +889,11 @@ def _public_task(task: dict) -> dict:
     created = task["created_at"]
     started = task.get("started_at")
     completed = task.get("completed_at")
-    result = {k: v for k, v in task.items() if not k.endswith("_path") and k not in ("output_dir", "runner")}
+    result = {
+        key: value for key, value in task.items()
+        if not key.endswith("_path")
+        and key not in ("input_paths", "output_dir", "runner")
+    }
     result.setdefault("workflow_name", DEFAULT_WORKFLOW_NAME)
     result["queue_seconds"] = round((started or now) - created)
     result["run_seconds"] = round(((completed or now) - started)) if started else 0
@@ -659,6 +932,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _require_active_license(self) -> bool:
+        status = LICENSE.status(check_online=True)
+        if status["active"]:
+            return True
+        self._json({
+            "error": status.get("message") or "授权不可用",
+            "license_required": True,
+        }, 403)
+        return False
+
     def _login_internal_session(self, parsed):
         session_id = parse_qs(parsed.query).get("session_id", [""])[0]
         token = self.headers.get("X-Login-Token", "")
@@ -684,9 +967,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         allowed = {
             ".png", ".jpg", ".jpeg", ".webp", ".bmp",
             ".mp4", ".mov", ".webm", ".avi", ".mkv",
+            ".mp3", ".wav", ".m4a", ".aac", ".flac",
         }
         if suffix not in allowed:
-            raise ValueError("仅支持常见图片或视频文件")
+            raise ValueError("仅支持常见图片、视频或音频文件")
         target = UPLOADS / f"{uuid.uuid4().hex}{suffix}"
         target.write_bytes(content)
         return self._json({
@@ -744,6 +1028,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json({"error": "Forbidden"}, 403)
         if path == "/api/files":
             return self._json(_scan_files())
+        if path == "/api/workflows":
+            return self._json(_public_workflows())
+        if path == "/api/license/status":
+            return self._json(LICENSE.status(check_online=True))
         if path == "/api/accounts":
             return self._json(_account_list())
         if path == "/api/tasks":
@@ -855,6 +1143,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             path = unquote(urlparse(self.path).path)
+            if path in {"/api/uploads", "/api/run", "/api/restart", "/api/batch-run"}:
+                if not self._require_active_license():
+                    return
             if path == "/api/uploads":
                 return self._upload_file()
             if path == "/api/internal/login/frame":
@@ -862,6 +1153,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._do_post()
         except ValueError as exc:
             return self._json({"error": str(exc)}, 400)
+        except ConnectionError as exc:
+            return self._json({"error": str(exc)}, 503)
         except Exception as exc:
             logger.exception("POST %s failed", self.path)
             return self._json({"error": str(exc)}, 500)
@@ -921,6 +1214,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         data = self._body()
+
+        if path == "/api/license/activate":
+            code = str(data.get("code") or "").strip()
+            if not code:
+                raise ValueError("请输入激活码")
+            return self._json(LICENSE.activate(code))
+
+        if path == "/api/license/renew":
+            code = str(data.get("code") or "").strip()
+            if not code:
+                raise ValueError("请输入续费卡密")
+            return self._json(LICENSE.renew(code))
+
+        if path == "/api/license/check":
+            return self._json(LICENSE.check_now())
 
         if path == "/api/internal/login/status":
             session = self._login_internal_session(parsed)
@@ -1064,9 +1372,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json({"status": "accepted"})
 
         if path == "/api/run":
-            video_path = _resolve_uploaded_material(data.get("video"))
-            model_path = _resolve_uploaded_material(data.get("model"))
-            clothing_path = None
+            workflow = _workflow_config(data.get("workflow"))
+            input_paths = _resolve_workflow_inputs(workflow, data)
             requested = str(data.get("account") or "auto")
             if requested != "auto":
                 accounts = {a["id"]: a for a in _account_list()}
@@ -1074,30 +1381,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ValueError("指定账号未登录、登录已过期或尚未设置 Workflow")
 
             now = time.time()
-            task_id = f"task_{int(now * 1000)}_{uuid.uuid4().hex[:6]}"
-            task = {
-                "task_id": task_id,
-                "workflow_name": DEFAULT_WORKFLOW_NAME,
-                "status": "queued",
-                "requested_account": requested,
-                "account": None,
-                "phone": None,
-                "workflow_id": None,
-                "video": Path(video_path).name,
-                "model": Path(model_path).name,
-                "clothing": Path(clothing_path).name if clothing_path else None,
-                "video_path": video_path,
-                "model_path": model_path,
-                "clothing_path": clothing_path,
-                "created_at": now,
-                "started_at": None,
-                "completed_at": None,
-                "stage": "queued",
-                "stage_detail": "等待可用账号",
-                "heartbeat_at": now,
-                "files": [],
-                "error": None,
-            }
+            task = _new_task(workflow, input_paths, requested, now)
+            task_id = task["task_id"]
             with _tasks_lock:
                 _tasks[task_id] = task
                 _task_queue.append(task_id)
@@ -1114,40 +1399,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 old_task = _tasks.get(old_task_id)
                 if not old_task:
                     raise ValueError("任务不存在")
-                # Re-use the original file paths and account preference
-                video_path = old_task.get("video_path")
-                model_path = old_task.get("model_path")
-                clothing_path = old_task.get("clothing_path")
+                input_paths = dict(old_task.get("input_paths") or {})
                 requested = old_task.get("requested_account", "auto")
+                workflow = _workflow_config(old_task.get("workflow_key"))
 
-            if not video_path or not model_path:
+            if not input_paths:
                 raise ValueError("原任务缺少素材路径，无法重新提交")
 
             now = time.time()
-            task_id = f"task_{int(now * 1000)}_{uuid.uuid4().hex[:6]}"
-            task = {
-                "task_id": task_id,
-                "workflow_name": old_task.get("workflow_name", DEFAULT_WORKFLOW_NAME),
-                "status": "queued",
-                "requested_account": requested,
-                "account": None,
-                "phone": None,
-                "workflow_id": None,
-                "video": old_task.get("video", Path(video_path).name),
-                "model": old_task.get("model", Path(model_path).name),
-                "clothing": old_task.get("clothing") or (Path(clothing_path).name if clothing_path else None),
-                "video_path": video_path,
-                "model_path": model_path,
-                "clothing_path": clothing_path,
-                "created_at": now,
-                "started_at": None,
-                "completed_at": None,
-                "stage": "queued",
-                "stage_detail": "等待可用账号",
-                "heartbeat_at": now,
-                "files": [],
-                "error": None,
-            }
+            task = _new_task(workflow, input_paths, requested, now)
+            task_id = task["task_id"]
             with _tasks_lock:
                 _tasks[task_id] = task
                 _task_queue.append(task_id)
@@ -1157,6 +1418,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(response)
 
         if path == "/api/batch-run":
+            workflow = _workflow_config(DEFAULT_WORKFLOW_KEY)
             requested = str(data.get("account") or "auto")
             usage = int(data.get("usage_count_per_model", 1))
             if usage < 1:
@@ -1191,27 +1453,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     video_idx = i % len(videos)
                     clothing_idx = i % len(clothing_paths) if clothing_paths else -1
 
-                    task_id = f"task_{int(now * 1000)}_{uuid.uuid4().hex[:6]}"
-                    task = {
-                        "task_id": task_id,
-                        "batch_id": batch_id,
-                        "status": "queued",
-                        "requested_account": requested,
-                        "account": None,
-                        "phone": None,
-                        "workflow_id": None,
-                        "video": videos[video_idx]["name"],
-                        "model": models[model_idx]["name"],
-                        "clothing": clothes[clothing_idx]["name"] if clothing_idx >= 0 else None,
-                        "video_path": video_paths[video_idx],
-                        "model_path": model_paths[model_idx],
-                        "clothing_path": clothing_paths[clothing_idx] if clothing_idx >= 0 else None,
-                        "created_at": now,
-                        "started_at": None,
-                        "completed_at": None,
-                        "files": [],
-                        "error": None,
+                    inputs = {
+                        "video": video_paths[video_idx],
+                        "model": model_paths[model_idx],
                     }
+                    task = _new_task(workflow, inputs, requested, now)
+                    task_id = task["task_id"]
+                    task["batch_id"] = batch_id
+                    if clothing_idx >= 0:
+                        task["clothing"] = clothes[clothing_idx]["name"]
+                        task["clothing_path"] = clothing_paths[clothing_idx]
                     _tasks[task_id] = task
                     _task_queue.append(task_id)
                     created_count += 1
@@ -1230,66 +1481,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._json({"error": "Not found"}, 404)
 
 
-def _kill_port_process(port: int) -> bool:
-    """Find and kill the process occupying the given port (Windows only)."""
-    try:
-        result = subprocess.run(
-            ["netstat", "-ano"],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in result.stdout.splitlines():
-            if f":{port}" in line and "LISTENING" in line:
-                parts = line.strip().split()
-                pid = parts[-1]
-                print(f"  端口 {port} 被 PID {pid} 占用，正在终止...")
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", pid],
-                    capture_output=True, timeout=10,
-                )
-                time.sleep(1)
-                return True
-    except Exception as e:
-        print(f"  尝试释放端口 {port} 失败: {e}")
-    return False
-
-
-def _port_is_available(port: int) -> bool:
-    """Check if a port can be bound."""
-    import socket
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("0.0.0.0", port))
-            return True
-    except OSError:
-        return False
-
-
 def main():
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        instance_mutex = kernel32.CreateMutexW(
+            None, False, "Local\\YunComfyUI-Client-8080"
+        )
+        if not instance_mutex:
+            raise OSError("无法创建工作台单实例锁")
+        if ctypes.get_last_error() == 183:
+            print("YunComfyUI 工作台已经在运行。")
+            kernel32.CloseHandle(instance_mutex)
+            return
+
     actual_port = PORT
-    max_retries = 3
-
-    for attempt in range(max_retries):
-        try:
-            server = http.server.ThreadingHTTPServer(("0.0.0.0", actual_port), Handler)
-            break  # 创建成功，跳出重试循环
-        except OSError as e:
-            # 尝试杀掉占用端口的进程
-            print(f"端口 {actual_port} 启动失败: {e}")
-            if _kill_port_process(actual_port):
-                continue
-
-            # 如果杀不掉（比如被系统预留），尝试下一个端口
-            if attempt < max_retries - 1:
-                for next_port in range(actual_port + 1, actual_port + 100):
-                    if _port_is_available(next_port):
-                        print(f"  端口 {actual_port} 无法使用，切换到端口 {next_port}")
-                        actual_port = next_port
-                        break
-                else:
-                    raise
-                continue
-            raise
+    try:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", actual_port), Handler)
+    except OSError as exc:
+        raise OSError(
+            f"本机端口 {actual_port} 已被其他程序占用，请关闭占用程序后重试"
+        ) from exc
 
     print("=" * 56)
     print("  RunningHub 多账号任务台")
