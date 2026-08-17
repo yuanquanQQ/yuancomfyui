@@ -692,6 +692,53 @@ def _resolve_workflow_inputs(workflow: dict, data: dict) -> dict[str, str]:
     return resolved
 
 
+def _resolve_batch_workflow_inputs(workflow: dict, data: dict) -> list[dict[str, str]]:
+    raw_inputs = data.get("inputs")
+    if not isinstance(raw_inputs, dict):
+        raise ValueError("批量任务缺少 inputs")
+
+    repeat = int(data.get("repeat", 1))
+    if not 1 <= repeat <= 20:
+        raise ValueError("每组生成次数必须在 1–20 之间")
+
+    resolved: dict[str, list[str]] = {}
+    group_count = 1
+    for input_spec in workflow["inputs"]:
+        key = input_spec["key"]
+        raw_values = raw_inputs.get(key)
+        if not isinstance(raw_values, list):
+            raise ValueError(f"{input_spec['label']}必须是批量列表")
+        values = [str(value or "").strip() for value in raw_values]
+        values = [value for value in values if value]
+        if not values:
+            raise ValueError(f"缺少{input_spec['label']}")
+
+        if input_spec.get("input_type") == "text":
+            resolved[key] = values
+        else:
+            try:
+                resolved[key] = [
+                    _resolve_uploaded_material(value) for value in values
+                ]
+            except ValueError as exc:
+                raise ValueError(f"{input_spec['label']}：{exc}") from exc
+        group_count = max(group_count, len(values))
+
+    task_count = group_count * repeat
+    if task_count > 500:
+        raise ValueError("单个批次最多创建 500 个任务")
+
+    combinations = []
+    for group_index in range(group_count):
+        group = {
+            key: values[group_index % len(values)]
+            for key, values in resolved.items()
+        }
+        for _ in range(repeat):
+            combinations.append(dict(group))
+    return combinations
+
+
 def _new_task(
     workflow: dict,
     input_paths: dict[str, str],
@@ -1488,64 +1535,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(response)
 
         if path == "/api/batch-run":
-            workflow = _workflow_config(DEFAULT_WORKFLOW_KEY)
+            workflow = _workflow_config(data.get("workflow"))
             requested = str(data.get("account") or "auto")
-            usage = int(data.get("usage_count_per_model", 1))
-            if usage < 1:
-                raise ValueError("模特使用次数至少为 1")
-
-            files = _scan_files()
-            models = files.get("pic", [])
-            videos = files.get("video", [])
-            clothes = files.get("ple", [])
-
-            if not models:
-                raise ValueError("data/pic 目录中没有模特图片，无法批量生成")
-            if not videos:
-                raise ValueError("data/video 目录中没有视频素材，无法批量生成")
+            input_groups = _resolve_batch_workflow_inputs(workflow, data)
             if requested != "auto":
                 accounts = {a["id"]: a for a in _account_list()}
                 if requested not in accounts or not accounts[requested]["ready"]:
                     raise ValueError("指定账号未登录、登录已过期或尚未设置 Workflow")
 
-            model_paths = [str((DATA / "pic" / m["name"]).resolve()) for m in models]
-            video_paths = [str((DATA / "video" / v["name"]).resolve()) for v in videos]
-            clothing_paths = [str((DATA / "ple" / c["name"]).resolve()) for c in clothes] if clothes else []
-
-            total = len(models) * usage
             batch_id = f"batch_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-            created_count = 0
             now = time.time()
 
             with _tasks_lock:
-                for i in range(total):
-                    model_idx = i // usage
-                    video_idx = i % len(videos)
-                    clothing_idx = i % len(clothing_paths) if clothing_paths else -1
-
-                    inputs = {
-                        "video": video_paths[video_idx],
-                        "model": model_paths[model_idx],
-                    }
+                for index, inputs in enumerate(input_groups):
                     task = _new_task(workflow, inputs, requested, now)
                     task_id = task["task_id"]
                     task["batch_id"] = batch_id
-                    if clothing_idx >= 0:
-                        task["clothing"] = clothes[clothing_idx]["name"]
-                        task["clothing_path"] = clothing_paths[clothing_idx]
+                    task["batch_index"] = index + 1
+                    task["batch_size"] = len(input_groups)
                     _tasks[task_id] = task
                     _task_queue.append(task_id)
-                    created_count += 1
                     now += 0.001  # ensure unique task_id timestamps
 
             _dispatch_tasks()
             return self._json({
                 "batch_id": batch_id,
-                "tasks_created": created_count,
-                "usage_count_per_model": usage,
-                "model_count": len(models),
-                "video_count": len(videos),
-                "clothing_count": len(clothes),
+                "workflow": workflow["key"],
+                "tasks_created": len(input_groups),
+                "repeat": int(data.get("repeat", 1)),
             })
 
         return self._json({"error": "Not found"}, 404)
