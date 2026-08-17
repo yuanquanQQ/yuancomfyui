@@ -2,6 +2,8 @@
 .venv/
 .venv-local/
 .runtime/
+.pytest_cache/
+.test-tmp/
 __pycache__/
 *.py[cod]
 
@@ -31,6 +33,10 @@ outputs/
 *.webp
 *.bmp
 
+# Bundled client assets are intentionally versioned
+!client/data/
+!client/data/**
+
 # Build artifacts
 build/
 dist/
@@ -41,9 +47,12 @@ dist/
 docs/requirement_report_render/
 
 # License service secrets and generated administrator builds
-license_server/backups/
-license_server/secrets/
-admin_app/*.csv
+server/backups/
+server/secrets/
+admin/*.csv
 .license/
-license_server/.env.local
-license_server/local_data/
+server/.env.local
+server/local_data/
+
+# Cache left by the pre-monorepo server directory name
+/license_server/
