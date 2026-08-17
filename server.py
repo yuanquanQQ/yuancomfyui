@@ -32,6 +32,9 @@ from runninghub_client.workflow_specs import (
     QWEN_TRYON_SPEC,
     SCAIL_MULTI_REFERENCE_SPEC,
     SCAIL_SEVEN_OUTFIT_SPEC,
+    SCAIL_4K_POSE_BACKGROUND_SPEC,
+    KREA2_REALISTIC_4K_SPEC,
+    QWEN_MULTI_VIEW_SPEC,
 )
 
 logging.basicConfig(
@@ -90,6 +93,15 @@ SCAIL_MULTI_REFERENCE_WORKFLOW_ID = os.environ.get(
 SCAIL_SEVEN_OUTFIT_WORKFLOW_ID = os.environ.get(
     "RUNNINGHUB_SCAIL_SEVEN_OUTFIT_WORKFLOW_ID", ""
 ).strip()
+SCAIL_4K_POSE_BACKGROUND_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_SCAIL_4K_POSE_BACKGROUND_WORKFLOW_ID", ""
+).strip()
+KREA2_REALISTIC_4K_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_KREA2_REALISTIC_4K_WORKFLOW_ID", ""
+).strip()
+QWEN_MULTI_VIEW_WORKFLOW_ID = os.environ.get(
+    "RUNNINGHUB_QWEN_MULTI_VIEW_WORKFLOW_ID", "2089193238610669570"
+).strip()
 WORKFLOW_TIMEOUT_SECONDS = int(os.environ.get("WORKFLOW_TIMEOUT_SECONDS", "3000"))
 OOTD_WORKFLOW_TIMEOUT_SECONDS = int(os.environ.get(
     "OOTD_WORKFLOW_TIMEOUT_SECONDS", "7200"
@@ -102,13 +114,14 @@ WORKFLOWS = {
     "person_replace": {
         "key": "person_replace",
         "name": "人物替换",
-        "description": "参考人物与动作视频生成",
+        "description": "使用替换背景、参考人物与动作视频生成",
         "category": "video",
         "workflow_id": PERSON_REPLACE_WORKFLOW_ID,
         "spec": PERSON_REPLACE_SPEC,
         "timeout": WORKFLOW_TIMEOUT_SECONDS,
         "primary_input": "model",
         "inputs": (
+            {"key": "background", "label": "替换背景图", "media_type": "image"},
             {"key": "video", "label": "动作视频", "media_type": "video"},
             {"key": "model", "label": "人物参考图", "media_type": "image"},
         ),
@@ -220,6 +233,51 @@ WORKFLOWS = {
             {"key": "outfit5", "label": "第 5 段贴图", "media_type": "image"},
             {"key": "outfit6", "label": "第 6 段贴图", "media_type": "image"},
             {"key": "outfit7", "label": "第 7 段贴图", "media_type": "image"},
+        ),
+    },
+    "scail_4k_pose_background": {
+        "key": "scail_4k_pose_background",
+        "name": "极境 4K 姿势迁移 · 背景替换",
+        "description": "将人物迁移到背景场景并增强姿势与画面一致性",
+        "category": "image",
+        "workflow_id": SCAIL_4K_POSE_BACKGROUND_WORKFLOW_ID,
+        "spec": SCAIL_4K_POSE_BACKGROUND_SPEC,
+        "timeout": WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "person",
+        "inputs": (
+            {"key": "background", "label": "背景图", "media_type": "image"},
+            {"key": "person", "label": "人物图", "media_type": "image"},
+        ),
+    },
+    "krea2_realistic_4k": {
+        "key": "krea2_realistic_4k",
+        "name": "Krea2 超写实 4K 文生图",
+        "description": "输入画面提示词，生成超写实 4K 图片",
+        "category": "image",
+        "workflow_id": KREA2_REALISTIC_4K_WORKFLOW_ID,
+        "spec": KREA2_REALISTIC_4K_SPEC,
+        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "prompt",
+        "inputs": (
+            {
+                "key": "prompt",
+                "label": "画面提示词",
+                "input_type": "text",
+                "media_type": "text",
+            },
+        ),
+    },
+    "qwen_multi_view": {
+        "key": "qwen_multi_view",
+        "name": "Qwen 角色三视图 · 多视角",
+        "description": "根据一张角色参考图生成多角度全身、半身和面部视图",
+        "category": "image",
+        "workflow_id": QWEN_MULTI_VIEW_WORKFLOW_ID,
+        "spec": QWEN_MULTI_VIEW_SPEC,
+        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
+        "primary_input": "character",
+        "inputs": (
+            {"key": "character", "label": "角色参考图", "media_type": "image"},
         ),
     },
 }
@@ -621,6 +679,12 @@ def _resolve_workflow_inputs(workflow: dict, data: dict) -> dict[str, str]:
     resolved = {}
     for input_spec in workflow["inputs"]:
         key = input_spec["key"]
+        if input_spec.get("input_type") == "text":
+            value = str(data.get(key) or "").strip()
+            if not value:
+                raise ValueError(f"缺少{input_spec['label']}")
+            resolved[key] = value
+            continue
         try:
             resolved[key] = _resolve_uploaded_material(data.get(key))
         except ValueError as exc:
@@ -636,8 +700,13 @@ def _new_task(
 ) -> dict:
     created_at = now if now is not None else time.time()
     task_id = f"task_{int(created_at * 1000)}_{uuid.uuid4().hex[:6]}"
+    input_types = {
+        item["key"]: item.get("input_type", "file")
+        for item in workflow["inputs"]
+    }
     input_files = {
-        key: Path(path).name for key, path in input_paths.items()
+        key: (value[:80] if input_types.get(key) == "text" else Path(value).name)
+        for key, value in input_paths.items()
     }
     primary_key = workflow["primary_input"]
     task = {
@@ -701,6 +770,7 @@ def _run_task(task_id: str, account: str) -> dict:
                 task["workflow_id"])
     try:
         runner = BrowserRunner(
+            headless=False,
             slow_mo=200,
             workflow_id=task["workflow_id"],
             workflow_spec=workflow["spec"],

@@ -18,11 +18,25 @@ class UploadSpec:
 
 
 @dataclass(frozen=True)
+class TextInputSpec:
+    """Map one logical text input to one ComfyUI node widget."""
+
+    key: str
+    node_id: str
+    widget: str
+    label: str
+    required: bool = True
+
+
+@dataclass(frozen=True)
 class CompletionSpec:
     """Visible UI markers that authoritatively mean a run has finished."""
 
     markers: Sequence[str] = ("显示报告", "Show Report")
     minimum_run_seconds: int = 300
+
+
+IMAGE_COMPLETION = CompletionSpec(minimum_run_seconds=30)
 
 
 @dataclass(frozen=True)
@@ -45,6 +59,7 @@ class WorkflowSpec:
     name: str
     uploads: Sequence[UploadSpec]
     outputs: Sequence[OutputSpec]
+    texts: Sequence[TextInputSpec] = ()
     completion: CompletionSpec = field(default_factory=CompletionSpec)
     strict_outputs: bool = False
 
@@ -61,6 +76,19 @@ class WorkflowSpec:
                     )
                 continue
             resolved.append((upload, path))
+        return resolved
+
+    def resolve_texts(self, inputs: Mapping[str, Optional[str]]):
+        resolved = []
+        for text_input in self.texts:
+            value = str(inputs.get(text_input.key) or "").strip()
+            if not value:
+                if text_input.required:
+                    raise ValueError(
+                        f"Workflow {self.name!r} requires input {text_input.key!r}"
+                    )
+                continue
+            resolved.append((text_input, value))
         return resolved
 
 
@@ -87,6 +115,7 @@ ACTION_TRANSFER_SPEC = WorkflowSpec(
 PERSON_REPLACE_SPEC = WorkflowSpec(
     name="person_replace",
     uploads=(
+        UploadSpec("background", "247", "upload", "替换背景图", "image"),
         UploadSpec("model", "108", "upload", "人物参考图", "image"),
         UploadSpec("video", "112", "choose video to upload", "动作视频", "video"),
     ),
@@ -131,6 +160,7 @@ QWEN_TRYON_SPEC = WorkflowSpec(
             media_type="image",
         ),
     ),
+    completion=IMAGE_COMPLETION,
     strict_outputs=True,
 )
 
@@ -146,10 +176,7 @@ HD_RESTORE_SPEC = WorkflowSpec(
             media_type="image",
         ),
     ),
-    completion=CompletionSpec(
-        markers=("显示报告", "Show Report"),
-        minimum_run_seconds=0,
-    ),
+    completion=IMAGE_COMPLETION,
     strict_outputs=True,
 )
 
@@ -179,11 +206,12 @@ QWEN_PROMPT_IMAGE_SPEC = WorkflowSpec(
     ),
     outputs=(
         OutputSpec(
-            node_id="158",
+            node_id="161",
             menu_actions=("save image", "save preview"),
             media_type="image",
         ),
     ),
+    completion=IMAGE_COMPLETION,
     strict_outputs=True,
 )
 
@@ -240,6 +268,56 @@ SCAIL_SEVEN_OUTFIT_SPEC = WorkflowSpec(
     strict_outputs=True,
 )
 
+SCAIL_4K_POSE_BACKGROUND_SPEC = WorkflowSpec(
+    name="scail_4k_pose_background",
+    uploads=(
+        UploadSpec("background", "393", "upload", "背景图", "image"),
+        UploadSpec("person", "396", "upload", "人物图", "image"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="391",
+            menu_actions=("save image", "save preview"),
+            media_type="image",
+        ),
+    ),
+    completion=IMAGE_COMPLETION,
+    strict_outputs=True,
+)
+
+KREA2_REALISTIC_4K_SPEC = WorkflowSpec(
+    name="krea2_realistic_4k",
+    uploads=(),
+    outputs=(
+        OutputSpec(
+            node_id="83",
+            menu_actions=("save preview", "save image"),
+            media_type="image",
+        ),
+    ),
+    texts=(
+        TextInputSpec("prompt", "64", "text", "画面提示词"),
+    ),
+    completion=IMAGE_COMPLETION,
+    strict_outputs=True,
+)
+
+QWEN_MULTI_VIEW_SPEC = WorkflowSpec(
+    name="qwen_multi_view",
+    uploads=(
+        UploadSpec("character", "61", "upload", "角色参考图", "image"),
+    ),
+    outputs=(
+        OutputSpec(
+            node_id="448",
+            menu_actions=("save preview", "save image"),
+            media_type="image",
+        ),
+    ),
+    completion=IMAGE_COMPLETION,
+    strict_outputs=True,
+)
+
 WORKFLOW_SPECS = {
     ACTION_TRANSFER_SPEC.name: ACTION_TRANSFER_SPEC,
     PERSON_REPLACE_SPEC.name: PERSON_REPLACE_SPEC,
@@ -250,6 +328,9 @@ WORKFLOW_SPECS = {
     QWEN_PROMPT_IMAGE_SPEC.name: QWEN_PROMPT_IMAGE_SPEC,
     SCAIL_MULTI_REFERENCE_SPEC.name: SCAIL_MULTI_REFERENCE_SPEC,
     SCAIL_SEVEN_OUTFIT_SPEC.name: SCAIL_SEVEN_OUTFIT_SPEC,
+    SCAIL_4K_POSE_BACKGROUND_SPEC.name: SCAIL_4K_POSE_BACKGROUND_SPEC,
+    KREA2_REALISTIC_4K_SPEC.name: KREA2_REALISTIC_4K_SPEC,
+    QWEN_MULTI_VIEW_SPEC.name: QWEN_MULTI_VIEW_SPEC,
 }
 
 

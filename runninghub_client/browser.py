@@ -502,6 +502,50 @@ class BrowserRunner:
                 file_widget=upload.file_widget,
             )
 
+    def set_text_inputs(self, inputs):
+        """Set configured text widgets before submitting the workflow."""
+        for text_input, value in self.workflow_spec.resolve_texts(inputs):
+            self._report_progress(
+                "configuring", f"正在填写{text_input.label}"
+            )
+            result = self._comfy.evaluate(
+                """({nodeId, widgetName, value}) => {
+                    const node = app.graph.getNodeById(Number(nodeId));
+                    if (!node) return {state: 'node_not_found'};
+                    const widget = (node.widgets || []).find(
+                        item => item.name === widgetName
+                    );
+                    if (!widget) {
+                        return {
+                            state: 'widget_not_found',
+                            available: (node.widgets || []).map(item => item.name),
+                        };
+                    }
+                    widget.value = value;
+                    if (typeof widget.callback === 'function') {
+                        widget.callback(value, app.canvas, node);
+                    }
+                    if (node.onWidgetChanged) {
+                        node.onWidgetChanged(widgetName, value, null, widget);
+                    }
+                    app.graph.setDirtyCanvas(true, true);
+                    return {state: 'updated', length: value.length};
+                }""",
+                {
+                    "nodeId": text_input.node_id,
+                    "widgetName": text_input.widget,
+                    "value": value,
+                },
+            )
+            if result.get("state") != "updated":
+                raise RuntimeError(
+                    f"Text input node {text_input.node_id} update failed: {result}"
+                )
+            logger.info(
+                "Text input %s -> node %s widget %s (%d chars)",
+                text_input.label, text_input.node_id, text_input.widget, len(value),
+            )
+
     def upload_files(self, video_path, model_image_path, clothing_image_path=None):
         """Backward-compatible wrapper for the original workflow."""
         self.upload_inputs({
@@ -1726,6 +1770,120 @@ class BrowserRunner:
             logger.warning("DOM video extraction failed: %s", exc)
             return saved
 
+    def _download_preview_batch(self, base_dir, output, actions):
+        """Download every original image held by a PreviewImage batch node."""
+        node_id = output.node_id
+        raw_count = self._comfy.evaluate(
+            """(nodeId) => {
+                const node = app.graph.getNodeById(Number(nodeId));
+                if (!node) return 0;
+                const loaded = Array.isArray(node.imgs) ? node.imgs.length : 0;
+                const metadata = Array.isArray(node.images) ? node.images.length : 0;
+                return Math.max(loaded, metadata, 1);
+            }""",
+            node_id,
+        )
+        try:
+            image_count = int(raw_count)
+        except (TypeError, ValueError):
+            logger.debug(
+                "Preview image count unavailable for node %s: %r",
+                node_id, raw_count,
+            )
+            return None
+        if image_count <= 1:
+            return None
+
+        logger.info(
+            "Output node %s contains %d preview images; saving all",
+            node_id, image_count,
+        )
+        saved = []
+        for image_index in range(image_count):
+            last_error = None
+            for attempt in range(2):
+                try:
+                    with self._page.expect_download(timeout=30000) as dl:
+                        result = self._comfy.evaluate(
+                            """({nodeId, actions, imageIndex}) => {
+                                const node = app.graph.getNodeById(Number(nodeId));
+                                if (!node) return {state: 'node_not_found'};
+                                node.imageIndex = imageIndex;
+                                node.overIndex = imageIndex;
+                                if (node.setDirtyCanvas) {
+                                    node.setDirtyCanvas(true, true);
+                                }
+                                const options = app.canvas.getNodeMenuOptions
+                                    ? app.canvas.getNodeMenuOptions(node) : null;
+                                if (!options) return {state: 'no_options'};
+                                for (const option of options) {
+                                    if (!option) continue;
+                                    const label = option.content || option.label || '';
+                                    const normalized = String(label).trim().toLowerCase()
+                                        .replace(/[^a-z0-9]+/g, '');
+                                    if (!actions.includes(normalized)) continue;
+                                    if (!option.callback) {
+                                        return {state: 'no_callback', label};
+                                    }
+                                    option.callback();
+                                    return {state: 'invoked', label};
+                                }
+                                return {
+                                    state: 'not_found',
+                                    available: options.filter(Boolean).map(
+                                        option => option.content || option.label || ''
+                                    ),
+                                };
+                            }""",
+                            {
+                                "nodeId": node_id,
+                                "actions": actions,
+                                "imageIndex": image_index,
+                            },
+                        )
+                    if (not isinstance(result, dict)
+                            or result.get("state") != "invoked"):
+                        raise RuntimeError(result or "unknown_error")
+
+                    download = dl.value
+                    suggested = Path(
+                        download.suggested_filename
+                        or f"output_{int(time.time())}.png"
+                    ).name
+                    suffix = Path(suggested).suffix or ".png"
+                    filename = (
+                        f"{Path(suggested).stem}_{image_index + 1:02d}{suffix}"
+                    )
+                    destination = base_dir / filename
+                    collision = 1
+                    while destination.exists():
+                        destination = base_dir / (
+                            f"{Path(filename).stem}_{collision}{suffix}"
+                        )
+                        collision += 1
+                    download.save_as(str(destination))
+                    saved.append(str(destination))
+                    logger.info(
+                        "Saved preview image %d/%d: %s (%d bytes)",
+                        image_index + 1, image_count, destination,
+                        destination.stat().st_size,
+                    )
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Preview image %d/%d save attempt %d failed: %s",
+                        image_index + 1, image_count, attempt + 1,
+                        str(exc)[:200],
+                    )
+                    self._page.wait_for_timeout(1000)
+            if last_error is not None:
+                raise RuntimeError(
+                    f"Output node {node_id} saved only {len(saved)}/{image_count} images"
+                ) from last_error
+        return saved
+
     def _download_via_context_menu(self, base_dir, output: Optional[OutputSpec] = None):
         """Invoke a configured save action and intercept its download."""
         self._dismiss_popups()
@@ -1737,6 +1895,11 @@ class BrowserRunner:
             re.sub(r"[^a-z0-9]+", "", action.casefold())
             for action in output.menu_actions
         ]
+
+        if output.media_type == "image":
+            batch_saved = self._download_preview_batch(base_dir, output, actions)
+            if batch_saved is not None:
+                return batch_saved
 
         # Use ComfyUI's getNodeMenuOptions to find and invoke the
         # "Save preview" callback directly — no right-click needed.
@@ -1874,6 +2037,7 @@ class BrowserRunner:
 
         # Validate all required logical inputs before opening a browser.
         self.workflow_spec.resolve_uploads(inputs)
+        self.workflow_spec.resolve_texts(inputs)
 
         try:
             self.start()
@@ -1886,6 +2050,7 @@ class BrowserRunner:
 
             with _upload_lock:
                 self.upload_inputs(inputs)
+                self.set_text_inputs(inputs)
 
             # ── Dismiss any stale completion popup from a previous run ──
             # If the browser session was reused or the page shows a leftover
