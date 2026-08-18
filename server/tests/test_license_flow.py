@@ -92,6 +92,13 @@ def test_complete_license_lifecycle(tmp_path):
         assert checked.status_code == 200
         assert checked.json()["refresh_token"] is None
 
+        catalog = client.post(
+            "/api/v1/license/workflows", json=check_payload(activated)
+        )
+        assert catalog.status_code == 200, catalog.text
+        assert catalog.json()["default_workflow_key"] == "person_replace"
+        assert len(catalog.json()["workflows"]) == 11
+
         renewal_card = generate_card(client, headers, "quarterly")
         original_expiry = datetime.fromisoformat(activated["expires_at"])
         renewal_payload = {**check_payload(activated), "code": renewal_card}

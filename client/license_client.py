@@ -267,18 +267,30 @@ class LicenseManager:
             return self.status(check_online=False)
 
     def _check_online(self):
+        result = self._request("POST", "/api/v1/license/check", self._auth_payload())
+        self._store_response(result)
+
+    def _auth_payload(self) -> dict:
         protected = self.state.get("refresh_token_protected")
         if not self.state.get("license_id") or not protected:
             raise LicenseError("尚未激活")
-        refresh_token = _dpapi_unprotect(protected)
-        result = self._request("POST", "/api/v1/license/check", {
+        return {
             "license_id": self.state["license_id"],
-            "refresh_token": refresh_token,
+            "refresh_token": _dpapi_unprotect(protected),
             "machine_hash": machine_hash(),
             "install_id": self.state["install_id"],
             "app_version": "1.0.0",
-        })
-        self._store_response(result)
+        }
+
+    def fetch_workflows(self) -> dict:
+        """Fetch the server-owned catalog without persisting it on disk."""
+        with self.lock:
+            result = self._request(
+                "POST", "/api/v1/license/workflows", self._auth_payload()
+            )
+            if not isinstance(result.get("workflows"), list):
+                raise LicenseError("工作流服务返回的数据无效")
+            return result
 
     def renew(self, code: str) -> dict:
         with self.lock:

@@ -41,12 +41,31 @@ class SchedulerTests(unittest.TestCase):
             server.APP_ROOT,
             server.QUEUE_TIMEOUT_SECONDS,
             server.MAX_TASK_REQUEUES,
+            server.WORKFLOWS,
+            server.DEFAULT_WORKFLOW_KEY,
+            server.DEFAULT_WORKFLOW_NAME,
+            server._workflow_catalog_loaded_at,
         )
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         server.PROFILES = root / "profiles"
         server.APP_ROOT = root
         server.PROFILES.mkdir()
+        test_spec = WorkflowSpec(
+            name="scheduler_test",
+            uploads=(),
+            outputs=(OutputSpec(node_id="1"),),
+        )
+        server.WORKFLOWS = {
+            "scheduler_test": {
+                "key": "scheduler_test", "name": "调度测试",
+                "workflow_id": "123456", "timeout": 60,
+                "inputs": (), "spec": test_spec,
+            },
+        }
+        server.DEFAULT_WORKFLOW_KEY = "scheduler_test"
+        server.DEFAULT_WORKFLOW_NAME = "调度测试"
+        server._workflow_catalog_loaded_at = time.time()
         with server._tasks_lock:
             server._tasks.clear()
             server._task_queue.clear()
@@ -59,7 +78,16 @@ class SchedulerTests(unittest.TestCase):
             server._tasks.clear()
             server._task_queue.clear()
             server._account_busy.clear()
-        server.PROFILES, server.APP_ROOT, server.QUEUE_TIMEOUT_SECONDS, server.MAX_TASK_REQUEUES = self.original
+        (
+            server.PROFILES,
+            server.APP_ROOT,
+            server.QUEUE_TIMEOUT_SECONDS,
+            server.MAX_TASK_REQUEUES,
+            server.WORKFLOWS,
+            server.DEFAULT_WORKFLOW_KEY,
+            server.DEFAULT_WORKFLOW_NAME,
+            server._workflow_catalog_loaded_at,
+        ) = self.original
         self.temp_dir.cleanup()
 
     def add_account(self, account):

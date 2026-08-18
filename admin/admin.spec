@@ -26,4 +26,5 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon=str((SPECPATH + '/../installer/assets/admin-icon.ico')),
 )

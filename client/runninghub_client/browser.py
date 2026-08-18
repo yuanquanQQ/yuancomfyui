@@ -1,13 +1,4 @@
-"""
-Browser automation for RunningHub workflow execution via Playwright.
-
-Key facts:
-  - ComfyUI is in iframe#iframe2077016634568560641
-  - Node 1055 = VHS_LoadVideo (视频), button widget: "choose video to upload"
-  - Node 1116 = LoadImage (人物模特), button widget: "upload"
-  - Node 1117 = LoadImage (衣服), button widget: "upload"
-  - Node 1058 = VHS_VideoCombine (output), right-click -> save preview
-"""
+"""Generic browser automation for server-configured RunningHub workflows."""
 
 import json
 import logging
@@ -20,7 +11,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable, Optional
 
-from .workflow_specs import ACTION_TRANSFER_SPEC, OutputSpec, WorkflowSpec
+from .workflow_specs import OutputSpec, WorkflowSpec
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +66,8 @@ def _ensure_playwright_browsers_path():
     # Frozen EXE: prefer the bundled browsers extracted from the EXE
     if getattr(sys, "frozen", False):
         bundled = Path(sys._MEIPASS) / "ms-playwright"
-        if (bundled / "chromium-1228").is_dir() or (bundled / "chromium_headless_shell-1228").is_dir():
+        if (any(bundled.glob("chromium-*")) or
+                any(bundled.glob("chromium_headless_shell-*"))):
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled)
             logger.info("PLAYWRIGHT_BROWSERS_PATH → %s (bundled)", bundled)
             return
@@ -121,7 +113,7 @@ class BrowserRunner:
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         self.workflow_url = workflow_url
         self.workflow_id = workflow_id
-        self.workflow_spec = workflow_spec or ACTION_TRANSFER_SPEC
+        self.workflow_spec = workflow_spec
         self.progress_callback = progress_callback
         self._browser = None
         self._context = None
@@ -143,6 +135,11 @@ class BrowserRunner:
                 self.progress_callback(stage, detail)
             except Exception as exc:
                 logger.warning("Progress callback failed: %s", exc)
+
+    def _require_workflow_spec(self) -> WorkflowSpec:
+        if self.workflow_spec is None:
+            raise ValueError("缺少服务器工作流执行配置")
+        return self.workflow_spec
 
     def _candidate_workflow_urls(self):
         if self.workflow_url:
@@ -2021,6 +2018,7 @@ class BrowserRunner:
         ``inputs`` is the generic multi-workflow API. The named path arguments
         remain supported for callers of the original action-transfer workflow.
         """
+        self._require_workflow_spec()
         if inputs is None:
             if model_image_path and image_path and model_image_path != image_path:
                 raise ValueError(

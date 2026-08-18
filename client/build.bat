@@ -20,10 +20,11 @@ echo.
 echo ============================================
 echo   [1/4] Checking icon...
 echo ============================================
-if exist "app_icon.ico" (
-  echo   app_icon.ico ready
+if exist "..\installer\assets\client-icon.ico" (
+  echo   installer\assets\client-icon.ico ready
 ) else (
-  echo   WARNING: app_icon.ico missing, default icon will be used
+  echo   ERROR: installer\assets\client-icon.ico missing
+  exit /b 1
 )
 
 echo.

@@ -16,7 +16,6 @@ import sys
 import threading
 import time
 import uuid
-import webbrowser
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -24,19 +23,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from license_client import LicenseError, LicenseManager
 from runninghub_client.browser import BrowserRunner
-from runninghub_client.workflow_specs import (
-    ANIMATE_TRANSFER_SPEC,
-    HD_RESTORE_SPEC,
-    OOTD_7DAY_SPEC,
-    PERSON_REPLACE_SPEC,
-    QWEN_PROMPT_IMAGE_SPEC,
-    QWEN_TRYON_SPEC,
-    SCAIL_MULTI_REFERENCE_SPEC,
-    SCAIL_SEVEN_OUTFIT_SPEC,
-    SCAIL_4K_POSE_BACKGROUND_SPEC,
-    KREA2_REALISTIC_4K_SPEC,
-    QWEN_MULTI_VIEW_SPEC,
-)
+from runninghub_client.workflow_specs import workflow_spec_from_dict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,222 +57,14 @@ STATIC = BUNDLE_ROOT / "static"
 PORT = 8080
 MAX_WORKERS = 10
 LOGIN_WORKERS = 2
-PERSON_REPLACE_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_WORKFLOW_ID", "2087970301203279874"
-).strip()
-OOTD_7DAY_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_OOTD_WORKFLOW_ID", ""
-).strip()
-QWEN_TRYON_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_QWEN_TRYON_WORKFLOW_ID", ""
-).strip()
-HD_RESTORE_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_HD_RESTORE_WORKFLOW_ID", ""
-).strip()
-ANIMATE_TRANSFER_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_ANIMATE_TRANSFER_WORKFLOW_ID", ""
-).strip()
-QWEN_PROMPT_IMAGE_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_QWEN_PROMPT_IMAGE_WORKFLOW_ID", ""
-).strip()
-SCAIL_MULTI_REFERENCE_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_SCAIL_MULTI_REFERENCE_WORKFLOW_ID", ""
-).strip()
-SCAIL_SEVEN_OUTFIT_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_SCAIL_SEVEN_OUTFIT_WORKFLOW_ID", ""
-).strip()
-SCAIL_4K_POSE_BACKGROUND_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_SCAIL_4K_POSE_BACKGROUND_WORKFLOW_ID", ""
-).strip()
-KREA2_REALISTIC_4K_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_KREA2_REALISTIC_4K_WORKFLOW_ID", ""
-).strip()
-QWEN_MULTI_VIEW_WORKFLOW_ID = os.environ.get(
-    "RUNNINGHUB_QWEN_MULTI_VIEW_WORKFLOW_ID", "2089193238610669570"
-).strip()
-WORKFLOW_TIMEOUT_SECONDS = int(os.environ.get("WORKFLOW_TIMEOUT_SECONDS", "3000"))
-OOTD_WORKFLOW_TIMEOUT_SECONDS = int(os.environ.get(
-    "OOTD_WORKFLOW_TIMEOUT_SECONDS", "7200"
-))
 QUEUE_TIMEOUT_SECONDS = int(os.environ.get("QUEUE_TIMEOUT_SECONDS", "86400"))
 MAX_TASK_REQUEUES = int(os.environ.get("MAX_TASK_REQUEUES", "2"))
 
-DEFAULT_WORKFLOW_KEY = "person_replace"
-WORKFLOWS = {
-    "person_replace": {
-        "key": "person_replace",
-        "name": "人物替换",
-        "description": "使用替换背景、参考人物与动作视频生成",
-        "category": "video",
-        "workflow_id": PERSON_REPLACE_WORKFLOW_ID,
-        "spec": PERSON_REPLACE_SPEC,
-        "timeout": WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "model",
-        "inputs": (
-            {"key": "background", "label": "替换背景图", "media_type": "image"},
-            {"key": "video", "label": "动作视频", "media_type": "video"},
-            {"key": "model", "label": "人物参考图", "media_type": "image"},
-        ),
-    },
-    "ootd_7day": {
-        "key": "ootd_7day",
-        "name": "OOTD 7天变装",
-        "description": "7 张穿搭图片生成并合成长视频",
-        "category": "video",
-        "workflow_id": OOTD_7DAY_WORKFLOW_ID,
-        "spec": OOTD_7DAY_SPEC,
-        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "day1",
-        "inputs": tuple(
-            {"key": f"day{day}", "label": f"第 {day} 天图片", "media_type": "image"}
-            for day in range(1, 8)
-        ) + (
-            {"key": "audio", "label": "背景音乐", "media_type": "audio"},
-        ),
-    },
-    "qwen_tryon": {
-        "key": "qwen_tryon",
-        "name": "一键换衣 · 千问版",
-        "description": "上传人物图和衣服图，只替换人物服装",
-        "category": "image",
-        "workflow_id": QWEN_TRYON_WORKFLOW_ID,
-        "spec": QWEN_TRYON_SPEC,
-        "timeout": WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "person",
-        "inputs": (
-            {"key": "person", "label": "人物图片", "media_type": "image"},
-            {"key": "garment", "label": "衣服图片", "media_type": "image"},
-        ),
-    },
-    "hd_restore": {
-        "key": "hd_restore",
-        "name": "高定版高清修复",
-        "description": "去除 AI 感并增强图片细节",
-        "category": "image",
-        "workflow_id": HD_RESTORE_WORKFLOW_ID,
-        "spec": HD_RESTORE_SPEC,
-        "timeout": WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "image",
-        "inputs": (
-            {"key": "image", "label": "待修复图片", "media_type": "image"},
-        ),
-    },
-    "animate_transfer": {
-        "key": "animate_transfer",
-        "name": "Animate 动作迁移 ProMax",
-        "description": "根据动作视频驱动人物并自动匹配尺寸",
-        "category": "video",
-        "workflow_id": ANIMATE_TRANSFER_WORKFLOW_ID,
-        "spec": ANIMATE_TRANSFER_SPEC,
-        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "reference_image",
-        "inputs": (
-            {"key": "motion_video", "label": "动作视频", "media_type": "video"},
-            {"key": "reference_image", "label": "人物参考图", "media_type": "image"},
-        ),
-    },
-    "qwen_prompt_image": {
-        "key": "qwen_prompt_image",
-        "name": "Qwen3 反推提示词 + Z-Image",
-        "description": "从参考图反推提示词并重新生成高清图片",
-        "category": "image",
-        "workflow_id": QWEN_PROMPT_IMAGE_WORKFLOW_ID,
-        "spec": QWEN_PROMPT_IMAGE_SPEC,
-        "timeout": WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "reference",
-        "inputs": (
-            {"key": "reference", "label": "参考图片", "media_type": "image"},
-        ),
-    },
-    "scail_multi_reference": {
-        "key": "scail_multi_reference",
-        "name": "极境 SCAIL2 动作迁移（多参考）",
-        "description": "使用动作视频和 6 张人物参考图生成动作迁移视频",
-        "category": "video",
-        "workflow_id": SCAIL_MULTI_REFERENCE_WORKFLOW_ID,
-        "spec": SCAIL_MULTI_REFERENCE_SPEC,
-        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "reference1",
-        "inputs": (
-            {"key": "motion_video", "label": "动作视频", "media_type": "video"},
-            {"key": "reference1", "label": "参考图 1", "media_type": "image"},
-            {"key": "reference2", "label": "参考图 2", "media_type": "image"},
-            {"key": "reference3", "label": "参考图 3", "media_type": "image"},
-            {"key": "reference4", "label": "参考图 4", "media_type": "image"},
-            {"key": "reference5", "label": "参考图 5", "media_type": "image"},
-            {"key": "reference6", "label": "参考图 6", "media_type": "image"},
-        ),
-    },
-    "scail_seven_outfit": {
-        "key": "scail_seven_outfit",
-        "name": "SCAIL 2 七段贴图换装",
-        "description": "使用动作视频和 7 张服装贴图生成七段换装视频",
-        "category": "video",
-        "workflow_id": SCAIL_SEVEN_OUTFIT_WORKFLOW_ID,
-        "spec": SCAIL_SEVEN_OUTFIT_SPEC,
-        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "outfit1",
-        "inputs": (
-            {"key": "motion_video", "label": "动作视频", "media_type": "video"},
-            {"key": "outfit1", "label": "第 1 段贴图", "media_type": "image"},
-            {"key": "outfit2", "label": "第 2 段贴图", "media_type": "image"},
-            {"key": "outfit3", "label": "第 3 段贴图", "media_type": "image"},
-            {"key": "outfit4", "label": "第 4 段贴图", "media_type": "image"},
-            {"key": "outfit5", "label": "第 5 段贴图", "media_type": "image"},
-            {"key": "outfit6", "label": "第 6 段贴图", "media_type": "image"},
-            {"key": "outfit7", "label": "第 7 段贴图", "media_type": "image"},
-        ),
-    },
-    "scail_4k_pose_background": {
-        "key": "scail_4k_pose_background",
-        "name": "极境 4K 姿势迁移 · 背景替换",
-        "description": "将人物迁移到背景场景并增强姿势与画面一致性",
-        "category": "image",
-        "workflow_id": SCAIL_4K_POSE_BACKGROUND_WORKFLOW_ID,
-        "spec": SCAIL_4K_POSE_BACKGROUND_SPEC,
-        "timeout": WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "person",
-        "inputs": (
-            {"key": "background", "label": "背景图", "media_type": "image"},
-            {"key": "person", "label": "人物图", "media_type": "image"},
-        ),
-    },
-    "krea2_realistic_4k": {
-        "key": "krea2_realistic_4k",
-        "name": "Krea2 超写实 4K 文生图",
-        "description": "输入画面提示词，生成超写实 4K 图片",
-        "category": "image",
-        "workflow_id": KREA2_REALISTIC_4K_WORKFLOW_ID,
-        "spec": KREA2_REALISTIC_4K_SPEC,
-        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "prompt",
-        "inputs": (
-            {
-                "key": "prompt",
-                "label": "画面提示词",
-                "input_type": "text",
-                "media_type": "text",
-            },
-        ),
-    },
-    "qwen_multi_view": {
-        "key": "qwen_multi_view",
-        "name": "Qwen 角色三视图 · 多视角",
-        "description": "根据一张角色参考图生成多角度全身、半身和面部视图",
-        "category": "image",
-        "workflow_id": QWEN_MULTI_VIEW_WORKFLOW_ID,
-        "spec": QWEN_MULTI_VIEW_SPEC,
-        "timeout": OOTD_WORKFLOW_TIMEOUT_SECONDS,
-        "primary_input": "character",
-        "inputs": (
-            {"key": "character", "label": "角色参考图", "media_type": "image"},
-        ),
-    },
-}
-
-DEFAULT_WORKFLOW_ID = PERSON_REPLACE_WORKFLOW_ID
-DEFAULT_WORKFLOW_SPEC = PERSON_REPLACE_SPEC
-DEFAULT_WORKFLOW_NAME = WORKFLOWS[DEFAULT_WORKFLOW_KEY]["name"]
+DEFAULT_WORKFLOW_KEY = ""
+DEFAULT_WORKFLOW_NAME = "工作流"
+WORKFLOWS: dict[str, dict] = {}
+_workflow_catalog_lock = threading.RLock()
+_workflow_catalog_loaded_at = 0.0
 
 # ---- Ensure required directories exist ----------------------------------
 for _dir in (DATA / "pic", DATA / "ple", DATA / "video", UPLOADS, PROFILES, APP_ROOT / "outputs"):
@@ -444,14 +223,56 @@ def _normalize_phone(value: str) -> tuple[str, str]:
     return phone, account_id
 
 
-def _validate_workflow_id(value: str) -> str:
-    workflow_id = str(value or "").strip()
-    if not workflow_id or not re.fullmatch(r"\d{6,30}", workflow_id):
-        raise ValueError("Workflow ID 应为 6–30 位数字")
-    return workflow_id
+def _refresh_workflow_catalog(force=False) -> None:
+    global DEFAULT_WORKFLOW_KEY, DEFAULT_WORKFLOW_NAME, WORKFLOWS
+    global _workflow_catalog_loaded_at
+    with _workflow_catalog_lock:
+        if (not force and WORKFLOWS
+                and time.time() - _workflow_catalog_loaded_at < 60):
+            return
+        try:
+            catalog = LICENSE.fetch_workflows()
+        except ConnectionError:
+            if WORKFLOWS:
+                return
+            raise
+        parsed = {}
+        for item in catalog["workflows"]:
+            if not isinstance(item, dict):
+                raise LicenseError("工作流服务返回的数据无效")
+            key = str(item.get("key") or "").strip()
+            workflow_id = str(item.get("workflow_id") or "").strip()
+            if not re.fullmatch(r"[a-z0-9_]{1,64}", key):
+                raise LicenseError("工作流标识无效")
+            if not re.fullmatch(r"\d{6,30}", workflow_id):
+                raise LicenseError(f"工作流 {key} 的 RunningHub ID 无效")
+            workflow = dict(item)
+            workflow["workflow_id"] = workflow_id
+            workflow["inputs"] = tuple(workflow.get("inputs") or ())
+            workflow["timeout"] = int(workflow.get("timeout") or 3000)
+            workflow["spec"] = workflow_spec_from_dict(workflow.get("spec") or {})
+            parsed[key] = workflow
+        default_key = str(catalog.get("default_workflow_key") or "").strip()
+        if not parsed or default_key not in parsed:
+            raise LicenseError("服务器没有提供可用工作流")
+        WORKFLOWS = parsed
+        DEFAULT_WORKFLOW_KEY = default_key
+        DEFAULT_WORKFLOW_NAME = parsed[default_key]["name"]
+        _workflow_catalog_loaded_at = time.time()
+
+
+def _clear_workflow_catalog() -> None:
+    global DEFAULT_WORKFLOW_KEY, DEFAULT_WORKFLOW_NAME, WORKFLOWS
+    global _workflow_catalog_loaded_at
+    with _workflow_catalog_lock:
+        WORKFLOWS = {}
+        DEFAULT_WORKFLOW_KEY = ""
+        DEFAULT_WORKFLOW_NAME = "工作流"
+        _workflow_catalog_loaded_at = 0.0
 
 
 def _workflow_config(key: str | None, require_configured=True) -> dict:
+    _refresh_workflow_catalog()
     workflow_key = str(key or DEFAULT_WORKFLOW_KEY).strip()
     workflow = WORKFLOWS.get(workflow_key)
     if not workflow:
@@ -464,6 +285,7 @@ def _workflow_config(key: str | None, require_configured=True) -> dict:
 
 
 def _public_workflows() -> list[dict]:
+    _refresh_workflow_catalog()
     return [
         {
             "key": workflow["key"],
@@ -594,21 +416,18 @@ def _account_list() -> list[dict]:
         cfg = _read_json(profile / "config.json", {})
         session = _session_info(profile / "state.json")
         login_session = login_sessions.get(profile.name)
-        workflow_id = DEFAULT_WORKFLOW_ID
         phone = str(cfg.get("phone") or (profile.name if profile.name != "default" else "未登记号码"))
         accounts.append({
             "id": profile.name,
             "name": profile.name,
             "phone": phone,
-            "workflow_id": workflow_id,
             "session_valid": session["valid"],
             "session_status": session["status"],
             "session_expires_at": session["expires_at"],
             "login_in_progress": profile.name in logging_accounts,
             "busy": profile.name in busy_accounts,
             "ready": bool(
-                session["valid"] and workflow_id
-                and profile.name not in logging_accounts
+                session["valid"] and profile.name not in logging_accounts
             ),
             "last_login_at": cfg.get("last_login_at"),
             "last_login_error": cfg.get("last_login_error"),
@@ -818,8 +637,8 @@ def _run_task(task_id: str, account: str) -> dict:
                 task["workflow_id"])
     try:
         runner = BrowserRunner(
-            headless=False,
-            slow_mo=200,
+            headless=True,
+            slow_mo=0,
             workflow_id=task["workflow_id"],
             workflow_spec=workflow["spec"],
             user_data_dir=str(PROFILES / account),
@@ -1147,7 +966,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/files":
             return self._json(_scan_files())
         if path == "/api/workflows":
-            return self._json(_public_workflows())
+            try:
+                return self._json(_public_workflows())
+            except (LicenseError, ConnectionError):
+                return self._json([])
         if path == "/api/license/status":
             return self._json(LICENSE.status(check_online=True))
         if path == "/api/accounts":
@@ -1349,7 +1171,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(LICENSE.check_now())
 
         if path == "/api/license/reset":
-            return self._json(LICENSE.reset())
+            result = LICENSE.reset()
+            _clear_workflow_catalog()
+            return self._json(result)
 
         if path == "/api/internal/login/status":
             session = self._login_internal_session(parsed)
@@ -1370,9 +1194,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/accounts":
             phone, account = _normalize_phone(data.get("phone"))
-            workflow_id = _validate_workflow_id(
-                data.get("workflow_id") or DEFAULT_WORKFLOW_ID
-            )
             profile = PROFILES / account
             cfg_path = profile / "config.json"
             old = _read_json(cfg_path, {})
@@ -1380,7 +1201,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cfg = {
                 **old,
                 "phone": phone,
-                "workflow_id": workflow_id,
                 "created_at": old.get("created_at", now),
                 "updated_at": now,
             }
@@ -1394,7 +1214,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("无效的账号标识")
             profile = PROFILES / account
             if not account or not (profile / "config.json").exists():
-                raise ValueError("请先保存电话号码和 Workflow ID")
+                raise ValueError("请先保存电话号码")
             # Keep the busy check and login marker registration atomic with the
             # dispatcher, which uses the same tasks -> login lock order.
             with _tasks_lock:
@@ -1414,30 +1234,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     _login_sessions[account] = session
                     (profile / "login_status.json").unlink(missing_ok=True)
 
+                    phone = str(_read_json(
+                        profile / "config.json", {}).get("phone", ""))
+                    worker_args = [
+                        "--profile", str(profile), "--phone", phone,
+                        "--timeout", "600",
+                        "--session-id", session["session_id"],
+                        "--ipc-token", session["token"],
+                        "--ipc-url",
+                        f"http://127.0.0.1:{self.server.server_address[1]}",
+                    ]
                     if getattr(sys, "frozen", False):
-                        import random
-                        tag = session["session_id"]
-                        _login_processes[account] = tag
-                        try:
-                            _login_executor.submit(
-                                _login_thread, account, profile, tag)
-                        except Exception:
-                            _login_processes.pop(account, None)
-                            raise
+                        command = [
+                            sys.executable, "--sms-login-worker", *worker_args]
                     else:
-                        phone = str(_read_json(profile / "config.json", {}).get("phone", ""))
-                        proc = subprocess.Popen(
-                            [sys.executable, str(BUNDLE_ROOT / "sms_login.py"),
-                              "--profile", str(profile), "--phone", phone,
-                              "--timeout", "600",
-                              "--session-id", session["session_id"],
-                              "--ipc-token", session["token"],
-                              "--ipc-url",
-                              f"http://127.0.0.1:{self.server.server_address[1]}"],
-                            cwd=str(APP_ROOT),
-                        )
-                        proc._login_session_id = session["session_id"]
-                        _login_processes[account] = proc
+                        command = [
+                            sys.executable, str(BUNDLE_ROOT / "sms_login.py"),
+                            *worker_args,
+                        ]
+                    proc = subprocess.Popen(
+                        command,
+                        cwd=str(APP_ROOT),
+                        creationflags=(
+                            subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                        ),
+                    )
+                    proc._login_session_id = session["session_id"]
+                    _login_processes[account] = proc
             return self._json({
                 "status": "login_started", "account": account,
                 **_public_login_session(session),
@@ -1595,26 +1418,37 @@ def main():
             f"本机端口 {actual_port} 已被其他程序占用，请关闭占用程序后重试"
         ) from exc
 
-    print("=" * 56)
-    print("  RunningHub 多账号任务台")
-    print(f"  数据目录:   {DATA}")
-    print(f"  账号目录:   {PROFILES}")
-    print(f"  输出目录:   {APP_ROOT / 'outputs'}")
-    print(f"  服务地址:   http://localhost:{actual_port}")
-    print("=" * 56)
     logger.info("Server listening on http://localhost:%d", actual_port)
-    threading.Timer(
-        0.8, lambda: webbrowser.open(f"http://127.0.0.1:{actual_port}")
-    ).start()
+    server_thread = threading.Thread(
+        target=server.serve_forever,
+        name="yuncomfyui-http",
+        daemon=True,
+    )
+    server_thread.start()
     try:
-        server.serve_forever()
+        import webview
+        webview.create_window(
+            "云创工作台",
+            f"http://127.0.0.1:{actual_port}",
+            width=1480,
+            height=920,
+            min_size=(1080, 700),
+        )
+        webview.start(debug=False)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
-        _executor.shutdown(wait=False)
-        _login_executor.shutdown(wait=False)
+        server.shutdown()
         server.server_close()
+        server_thread.join(timeout=5)
+        _executor.shutdown(wait=False, cancel_futures=True)
+        _login_executor.shutdown(wait=False, cancel_futures=True)
 
 
 if __name__ == "__main__":
-    main()
+    if "--sms-login-worker" in sys.argv:
+        sys.argv.remove("--sms-login-worker")
+        from sms_login import main as sms_login_main
+        sms_login_main()
+    else:
+        main()

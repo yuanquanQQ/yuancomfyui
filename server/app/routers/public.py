@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from ..dependencies import get_client_ip, get_db
 from ..schemas import ActivationRequest, LicenseCheckRequest, LicenseResponse, RenewalRequest
+from ..workflow_catalog import workflow_catalog_response
 
 
 router = APIRouter(prefix="/api/v1/license", tags=["license"])
@@ -45,3 +46,20 @@ def public_key(request: Request):
         "algorithm": "Ed25519",
         "public_key_pem": request.app.state.signer.public_key_pem(),
     }
+
+
+@router.post("/workflows")
+def workflows(
+    payload: LicenseCheckRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    client_ip: str | None = Depends(get_client_ip),
+):
+    service = request.app.state.license_service
+    license_record, _, _ = service.authenticate_device(db, payload)
+    service.audit(
+        db, "workflow.catalog", "client", payload.machine_hash,
+        "license", license_record.id, ip_address=client_ip,
+    )
+    db.commit()
+    return workflow_catalog_response()

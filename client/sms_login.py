@@ -8,7 +8,11 @@ from pathlib import Path
 import requests
 from playwright.sync_api import sync_playwright
 
-from runninghub_client.browser import _launch_browser
+from runninghub_client.browser import (
+    _ensure_playwright_browsers_path,
+    _ensure_playwright_driver,
+    _launch_browser,
+)
 
 
 class LoginIpc:
@@ -194,6 +198,8 @@ def main():
     playwright = browser = context = page = None
     try:
         ipc.status("starting", "正在打开 RunningHub 短信登录")
+        _ensure_playwright_driver()
+        _ensure_playwright_browsers_path()
         playwright = sync_playwright().start()
         browser = _launch_browser(playwright, {
             "headless": True,
@@ -222,11 +228,11 @@ def main():
                 break
             time.sleep(0.08)
         if not first_png:
-            raise RuntimeError("官方滑块验证区域未出现，请重新发起登录")
+            raise RuntimeError("滑块验证区域未出现，请重新发起登录")
         ipc.frame(first_png)
         ipc.status(
             "slider",
-            "请在工作台内完成官方滑块验证，然后输入短信验证码",
+            "请在工作台内完成滑块验证，然后输入短信验证码",
         )
 
         deadline = time.time() + args.timeout

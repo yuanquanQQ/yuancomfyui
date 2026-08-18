@@ -23,9 +23,13 @@ for _sp in site.getsitepackages():
 _ms_pw = Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
 _BUNDLED_BROWSERS = []
 if _ms_pw.is_dir():
-    for _name in ["chromium-1228", "chromium_headless_shell-1228", "ffmpeg-1011", "winldd-1007"]:
-        _p = _ms_pw / _name
-        if _p.is_dir():
+    for _prefix in ["chromium", "chromium_headless_shell", "ffmpeg", "winldd"]:
+        _candidates = sorted(
+            (path for path in _ms_pw.glob(f"{_prefix}-*") if path.is_dir()),
+            key=lambda path: int(path.name.rsplit("-", 1)[-1]),
+        )
+        _p = _candidates[-1] if _candidates else None
+        if _p:
             for _file in _p.rglob("*"):
                 if _file.is_file():
                     _rel = _file.relative_to(_ms_pw)
@@ -37,7 +41,7 @@ if _ms_pw.is_dir():
 # ---------------------------------------------------------------------------
 _datas = [
     (str(_root / "static" / "index.html"), "static"),
-    (str(_root / "runninghub_client"), "runninghub_client"),
+    (str(_root / "static" / "client-logo.png"), "static"),
 ]
 if _playwright_driver:
     _datas.append((str(_playwright_driver), "playwright/driver"))
@@ -77,6 +81,9 @@ a = Analysis(
         'pathlib',
         'urllib',
         'asyncio',
+        'webview',
+        'webview.platforms.edgechromium',
+        'sms_login',
     ],
     hookspath=[],
     hooksconfig={},
@@ -119,11 +126,11 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(_root / 'app_icon.ico'),
+    icon=str(_root.parent / 'installer' / 'assets' / 'client-icon.ico'),
 )

@@ -24,7 +24,8 @@ RUNNINGHUB_URL = "https://www.runninghub.cn"
 if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
     if getattr(sys, "frozen", False):
         bundled = Path(sys._MEIPASS) / "ms-playwright"
-        if (bundled / "chromium-1228").is_dir():
+        if (any(bundled.glob("chromium-*")) or
+                any(bundled.glob("chromium_headless_shell-*"))):
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled)
     if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
         local = os.environ.get("LOCALAPPDATA", "")

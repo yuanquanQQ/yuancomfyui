@@ -36,10 +36,15 @@ outputs/
 # Bundled client assets are intentionally versioned
 !client/data/
 !client/data/**
+!client/static/client-logo.png
+!admin/web/admin-logo.png
+!installer/assets/*.png
 
 # Build artifacts
 build/
 dist/
+release/
+installer/output/
 *.spec.bak
 *.log
 

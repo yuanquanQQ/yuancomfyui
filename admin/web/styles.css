@@ -22,7 +22,7 @@ button { cursor: pointer; }
 .login-panel { width: 410px; padding: 34px; background: white; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 16px 42px rgba(28, 45, 38, .12); }
 .login-panel h1 { margin: 18px 0 3px; font-size: 24px; }
 .login-panel > p { margin: 0 0 24px; color: var(--muted); }
-.brand-mark { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 7px; color: white; background: var(--green); font-weight: 700; }
+.brand-mark { width: 44px; height: 44px; display: block; border-radius: 7px; object-fit: contain; }
 .brand-mark.small { width: 36px; height: 36px; font-size: 12px; flex: 0 0 auto; }
 label { display: flex; flex-direction: column; gap: 7px; color: #3f4945; font-weight: 600; }
 .login-panel label { margin-top: 15px; }
