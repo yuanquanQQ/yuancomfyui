@@ -15,8 +15,6 @@ if not exist ".venv-local\Scripts\python.exe" (
 
 ".venv-local\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 exit /b 1
-".venv-local\Scripts\python.exe" -m pip install -r ..\server\requirements.txt
-if errorlevel 1 exit /b 1
 
 echo [OK] Python dependencies installed.
 echo The application will use Microsoft Edge when Playwright Chromium is absent.

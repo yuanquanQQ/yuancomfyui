@@ -8,7 +8,7 @@ from api_client import ApiError, LicenseApiClient
 
 
 APP_DIR = Path(__file__).resolve().parent
-SERVER_URL = "http://124.223.224.38"
+SERVER_URL = "https://drxbpb65n5.coze.site"
 
 
 class AdminBridge:

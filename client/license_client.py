@@ -312,6 +312,15 @@ class LicenseManager:
                 return self._public_status(False, str(exc))
             return self.status(check_online=False)
 
+    def reset(self) -> dict:
+        """Clear server-issued credentials while preserving this installation."""
+        with self.lock:
+            install_id = self.state.get("install_id") or uuid.uuid4().hex
+            self.state = {"install_id": install_id}
+            self.last_attempt_at = 0.0
+            self._save_state()
+            return self._public_status(False, "旧授权已清除，请输入新卡密激活")
+
     def status(self, check_online: bool = True) -> dict:
         with self.lock:
             receipt = self.state.get("receipt")

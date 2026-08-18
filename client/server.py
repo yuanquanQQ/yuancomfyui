@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+import webbrowser
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -292,7 +293,7 @@ for _dir in (DATA / "pic", DATA / "ple", DATA / "video", UPLOADS, PROFILES, APP_
 
 LICENSE = LicenseManager(
     APP_ROOT / ".license",
-    os.environ.get("LICENSE_SERVER_URL", "http://127.0.0.1:8088"),
+    os.environ.get("LICENSE_SERVER_URL", "https://drxbpb65n5.coze.site"),
 )
 
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="runner")
@@ -1347,6 +1348,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/license/check":
             return self._json(LICENSE.check_now())
 
+        if path == "/api/license/reset":
+            return self._json(LICENSE.reset())
+
         if path == "/api/internal/login/status":
             session = self._login_internal_session(parsed)
             if not session:
@@ -1599,6 +1603,9 @@ def main():
     print(f"  服务地址:   http://localhost:{actual_port}")
     print("=" * 56)
     logger.info("Server listening on http://localhost:%d", actual_port)
+    threading.Timer(
+        0.8, lambda: webbrowser.open(f"http://127.0.0.1:{actual_port}")
+    ).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

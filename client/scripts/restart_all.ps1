@@ -13,9 +13,6 @@ if (-not (Test-Path -LiteralPath $python)) {
   throw "Python environment not found. Run setup.bat first."
 }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "start_local_license.ps1")
-if ($LASTEXITCODE -ne 0) { throw "Local license service failed to start." }
-
 $listener = Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listener) {
   $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue

@@ -72,6 +72,28 @@ class LicenseClientTests(unittest.TestCase):
             saved = json.loads(saved_text)
             self.assertTrue(saved["refresh_token_protected"].startswith(("dpapi:", "local:")))
 
+    def test_reset_preserves_installation_and_removes_server_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = LicenseManager(Path(directory) / "state", "https://license.example")
+            install_id = manager.state["install_id"]
+            manager.state.update({
+                "license_id": "old-license",
+                "refresh_token_protected": "dpapi:old-token",
+                "public_key_pem": "old-public-key",
+                "receipt": "old-receipt",
+                "server_denied": True,
+            })
+            manager._save_state()
+
+            status = manager.reset()
+
+            self.assertFalse(status["active"])
+            self.assertIsNone(status["license_id"])
+            self.assertEqual({"install_id": install_id}, manager.state)
+            self.assertEqual({"install_id": install_id}, json.loads(
+                manager.state_path.read_text(encoding="utf-8")
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()
