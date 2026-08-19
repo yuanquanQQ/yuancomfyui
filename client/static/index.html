@@ -119,6 +119,14 @@
   </div>
 </div></div>
 <div class="toast" id="toast"></div>
+<div class="overlay" id="library-overlay" onclick="closeLibrary(event)"><div class="modal library-modal" onclick="event.stopPropagation()">
+  <div class="modal-head"><span class="modal-title">素材库</span><button class="close" onclick="closeLibrary()">×</button></div>
+  <div class="modal-body"><div style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><select id="library-filter" onchange="renderLibrary()"><option value="all">全部</option><option value="image">图片</option><option value="video">视频</option><option value="audio">音频</option><option value="text">文案</option></select><input id="library-upload-input" type="file" multiple onchange="uploadLibraryFiles(this.files)"></div><div id="library-list" class="account-list"><div class="panel-meta">正在加载</div></div></div>
+</div></div>
+<div class="overlay" id="works-overlay" onclick="closeWorks(event)"><div class="modal library-modal" onclick="event.stopPropagation()">
+  <div class="modal-head"><span class="modal-title">作品库</span><button class="close" onclick="closeWorks()">×</button></div>
+  <div class="modal-body"><div style="display:flex;gap:8px;margin-bottom:12px"><input id="works-search" placeholder="按日期、手机号或工作流搜索" oninput="renderWorks()"><button class="secondary" onclick="loadWorks()">刷新</button></div><div id="works-list" class="account-list"><div class="panel-meta">正在加载</div></div></div>
+</div></div>
 
 <script>
 const state={files:{},accounts:[],tasks:[],workflows:[],activeWorkflow:'',generationMode:'single',license:null};let refreshing=false,taskFilter='all',workflowCategory='all',renderedWorkflowKey=null,renderedCatalogSignature='',activeLoginAccount=null,activeLoginSession=null,activeLoginStage=null,loginSessionEpoch=0,loginViewTimer=null,loginViewController=null,loginViewObjectUrl=null,loginImageLoading=false,pointerActive=false,lastPointerMove=0,pointerRequestBusy=false,pointerRequestController=null,pendingPointer=null;
@@ -170,8 +178,16 @@ async function deleteAccount(account){if(!confirm('确定删除这个本机账�
 async function restartTask(taskId){try{await api('/api/restart',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:taskId})});toast('任务已重新提交');await refreshAll()}catch(e){toast(e.message,true)}}
 async function cancelTask(taskId){try{await api('/api/tasks/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:taskId})});toast('已请求取消');await refreshAll()}catch(e){toast(e.message,true)}}
 async function viewTask(taskId){const w=window.open(`/api/screenshot?task_id=${encodeURIComponent(taskId)}&t=${Date.now()}`,'_blank','width=1100,height=800');if(!w)toast('请允许弹出窗口',true)}
-async function openLibrary(){try{const r=await api('/api/library');alert('素材库：\n'+r.items.map(x=>`${x.type}  ${x.name}`).join('\n')||'暂无素材')}catch(e){toast(e.message,true)}}
-async function openWorks(){try{const r=await api('/api/works');alert('作品库（日期→手机号→工作流）：\n'+r.items.map(x=>`${x.date} / ${x.phone} / ${x.workflow} / ${x.name}`).join('\n')||'暂无作品')}catch(e){toast(e.message,true)}}
+let libraryItems=[],worksItems=[];
+async function openLibrary(){document.getElementById('library-overlay').classList.add('show');try{const r=await api('/api/library');libraryItems=r.items||[];renderLibrary()}catch(e){toast(e.message,true)}}
+function closeLibrary(e){if(e&&e.target!==document.getElementById('library-overlay'))return;document.getElementById('library-overlay').classList.remove('show')}
+function renderLibrary(){const kind=document.getElementById('library-filter').value;const list=document.getElementById('library-list');const rows=libraryItems.filter(x=>kind==='all'||x.type===kind);list.innerHTML=rows.length?rows.map(x=>`<div class="account-card"><div><div class="account-phone">${escapeHtml(x.name)}</div><div class="account-meta">${escapeHtml(x.type)} · ${Math.ceil(x.size/1024)} KB</div></div><div class="account-actions"><a class="secondary small" href="/${escapeAttr(x.path)}" target="_blank">预览</a><button class="secondary small danger" onclick="deleteLibraryItem('${escapeJs(x.id)}')">删除</button></div></div>`).join(''):'<div class="panel-meta">暂无素材</div>'}
+async function uploadLibraryFiles(files){for(const file of files){const body=new FormData();body.append('file',file,file.name);try{await api('/api/library/upload',{method:'POST',body,timeoutMs:300000})}catch(e){toast(e.message,true)}}openLibrary()}
+async function deleteLibraryItem(id){if(!confirm('确定删除这个素材吗？'))return;try{await api('/api/library/'+id,{method:'DELETE'});openLibrary()}catch(e){toast(e.message,true)}}
+async function openWorks(){document.getElementById('works-overlay').classList.add('show');await loadWorks()}
+function closeWorks(e){if(e&&e.target!==document.getElementById('works-overlay'))return;document.getElementById('works-overlay').classList.remove('show')}
+async function loadWorks(){try{const r=await api('/api/works');worksItems=r.items||[];renderWorks()}catch(e){toast(e.message,true)}}
+function renderWorks(){const q=(document.getElementById('works-search').value||'').toLowerCase();const rows=worksItems.filter(x=>[x.date,x.phone,x.workflow,x.name].join(' ').toLowerCase().includes(q));document.getElementById('works-list').innerHTML=rows.length?rows.map(x=>`<div class="account-card"><div><div class="account-phone">${escapeHtml(x.name)}</div><div class="account-meta">${escapeHtml(x.date)} / ${escapeHtml(x.phone)} / ${escapeHtml(x.workflow)}</div></div><div class="account-actions"><a class="secondary small" href="/${escapeAttr(x.path)}" target="_blank">打开结果</a></div></div>`).join(''):'<div class="panel-meta">暂无作品</div>'}
 function openAccountModal(){document.getElementById('account-overlay').classList.add('show');if(activeLoginAccount&&activeLoginSession){const active=state.accounts.find(a=>a.id===activeLoginAccount);if(active)renderSmsStage(active)}}
 function closeAccountModal(e){if(e&&e.target!==document.getElementById('account-overlay'))return;stopLoginView(true);document.getElementById('account-overlay').classList.remove('show')}
 function clearAccountForm(){document.getElementById('account-phone').value=''}
