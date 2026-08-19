@@ -59,6 +59,8 @@ admin/*.csv
 .license/
 server/.env.local
 server/local_data/
+client/library/
+client/works/
 
 # Cache left by the pre-monorepo server directory name
 /license_server/
