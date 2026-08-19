@@ -517,10 +517,17 @@ def _library_items():
         root = LIBRARY / folder
         for f in root.rglob("*") if root.exists() else ():
             if f.is_file():
+                preview = ""
+                if kind == "text":
+                    try:
+                        preview = f.read_text(encoding="utf-8", errors="replace")[:800]
+                    except OSError:
+                        pass
                 items.append({"id": str(f.relative_to(LIBRARY)).replace("\\", "/"), "name": f.name,
                               "type": kind, "path": str(f.relative_to(ROOT)).replace("\\", "/"),
                               "folder": str(f.parent.relative_to(root)).replace("\\", "/") if f.parent != root else "默认",
-                              "size": f.stat().st_size, "updated_at": f.stat().st_mtime})
+                              "size": f.stat().st_size, "updated_at": f.stat().st_mtime,
+                              "preview": preview})
     return sorted(items, key=lambda x: x["updated_at"], reverse=True)
 
 def _works_items():
