@@ -21,12 +21,18 @@ class BrowserPostTests(unittest.TestCase):
         self.context.pages = [self.page]
         self.runner._page = self.page
         self.runner._context = self.context
+        self.runner._dismiss_rife_popup = mock.MagicMock(return_value=False)
+        self.runner._dismiss_popups = mock.MagicMock()
         self.runner._find_comfy_frame = mock.MagicMock(return_value="comfy-frame")
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
     def test_post_mode_opens_post_clicks_run_and_finds_workflow(self):
+        self.page.url = "https://www.runninghub.cn/post/2087936157744189442"
+        self.button.click.side_effect = lambda **_kwargs: setattr(
+            self.page, "url", "https://www.runninghub.cn/workflow/current"
+        )
         self.runner._open_post_workflow()
 
         self.page.goto.assert_called_once_with(
@@ -39,6 +45,23 @@ class BrowserPostTests(unittest.TestCase):
         self.button.click.assert_called_once_with(timeout=15000)
         self.runner._find_comfy_frame.assert_called_once_with()
         self.assertEqual("comfy-frame", self.runner._comfy)
+
+    def test_post_mode_retries_after_overlay_blocks_first_navigation(self):
+        self.page.url = "https://www.runninghub.cn/post/2087936157744189442"
+        attempts = 0
+
+        def click(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                self.page.url = "https://www.runninghub.cn/workflow/current"
+
+        self.button.click.side_effect = click
+        self.runner._open_post_workflow()
+
+        self.assertEqual(2, self.button.click.call_count)
+        self.assertEqual(2, self.runner._dismiss_popups.call_count)
+        self.runner._find_comfy_frame.assert_called_once_with()
 
     def test_post_mode_reports_expired_login_instead_of_waiting_for_iframe(self):
         self.button.wait_for.side_effect = TimeoutError("button missing")

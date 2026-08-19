@@ -161,21 +161,33 @@ class BrowserRunner:
         self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
         run_button = self._page.get_by_text("运行工作流", exact=True).last
-        try:
-            run_button.wait_for(state="visible", timeout=30000)
-        except Exception as exc:
-            body = self._page.locator("body").inner_text(timeout=5000)
-            if "登录" in body:
-                raise RuntimeError("账号登录状态已失效，请重新登录") from exc
-            raise RuntimeError("Post 页面没有找到“运行工作流”按钮") from exc
+        for attempt in range(1, 4):
+            self._dismiss_rife_popup()
+            self._dismiss_popups()
+            try:
+                run_button.wait_for(state="visible", timeout=30000)
+            except Exception as exc:
+                body = self._page.locator("body").inner_text(timeout=5000)
+                if "登录" in body:
+                    raise RuntimeError("账号登录状态已失效，请重新登录") from exc
+                raise RuntimeError("Post 页面没有找到“运行工作流”按钮") from exc
 
-        pages_before = set(self._context.pages)
-        run_button.click(timeout=15000)
-        self._page.wait_for_timeout(1500)
-        new_pages = [page for page in self._context.pages if page not in pages_before]
-        if new_pages:
-            self._page = new_pages[-1]
-            self._page.wait_for_load_state("domcontentloaded", timeout=60000)
+            pages_before = set(self._context.pages)
+            run_button.click(timeout=15000)
+            self._page.wait_for_timeout(2500)
+            new_pages = [page for page in self._context.pages if page not in pages_before]
+            if new_pages:
+                self._page = new_pages[-1]
+                self._page.wait_for_load_state("domcontentloaded", timeout=60000)
+                break
+            if "/post/" not in self._page.url:
+                break
+            logger.info(
+                "Post run action did not navigate (attempt %d/3); "
+                "dismissing overlays and retrying", attempt,
+            )
+        else:
+            raise RuntimeError("点击“运行工作流”后页面没有进入工作流")
 
         try:
             body = self._page.locator("body").inner_text(timeout=5000)
@@ -1311,6 +1323,10 @@ class BrowserRunner:
             '.ant-modal-content .ant-modal-close',
             '.lucide-x',
             'svg.lucide-x',
+            '[class*="modal"] [class*="close"]',
+            '[class*="popup"] [class*="close"]',
+            '[class*="dialog"] [class*="close"]',
+            '[class*="modal"] button:has(svg)',
         ]
         # Main page
         for sel in close_selectors:

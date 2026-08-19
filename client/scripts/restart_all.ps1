@@ -5,8 +5,8 @@ $repoRoot = Split-Path -Parent $root
 $pythonCandidates = @(
   (Join-Path $root ".venv-local\Scripts\python.exe"),
   (Join-Path $root ".venv\Scripts\python.exe"),
-  (Join-Path $repoRoot ".venv-local\Scripts\python.exe"),
-  (Join-Path $repoRoot ".venv\Scripts\python.exe")
+  (Join-Path $repoRoot ".venv\Scripts\python.exe"),
+  (Join-Path $repoRoot ".venv-local\Scripts\python.exe")
 )
 $python = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not (Test-Path -LiteralPath $python)) {
