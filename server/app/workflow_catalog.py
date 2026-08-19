@@ -57,7 +57,7 @@ def workflow(key, name, description, category, workflow_id, primary_input,
 WORKFLOW_CATALOG = [
     workflow(
         "person_replace", "人物替换", "使用替换背景、参考人物与动作视频生成",
-        "video", "2087970301203279874", "model",
+        "video", "2089624864981344257", "model",
         [input_field("background", "替换背景图"), input_field("video", "动作视频", "video"), input_field("model", "人物参考图")],
         [upload("background", 247, "替换背景图"), upload("model", 108, "人物参考图"), upload("video", 112, "动作视频", "video", "choose video to upload")],
         [output(119, "video", "save video", "save preview")],
@@ -129,6 +129,18 @@ WORKFLOW_CATALOG = [
         "image", "2089193238610669570", "character",
         [input_field("character", "角色参考图")], [upload("character", 61, "角色参考图")],
         [output(448, "image", "save preview", "save image")], timeout=7200, minimum_run_seconds=30,
+    ),
+    workflow(
+        "minimax_h3_dual_stage", "Minimax H3 二采重绘 V2", "上传图片并生成 Minimax H3 二次采样重绘视频",
+        "video", "2089631767786516482", "source",
+        [input_field("source", "输入图片")], [upload("source", 137, "输入图片")],
+        [output(168, "video", "save video", "save preview")], timeout=7200,
+    ),
+    workflow(
+        "seedvr2_upscale", "SeedVR2 万物高清放大", "上传图片并生成 SeedVR2 高清放大结果",
+        "image", "2089631757506269186", "source",
+        [input_field("source", "输入图片")], [upload("source", 15, "输入图片")],
+        [output(101, "image", "save image", "save preview")], timeout=7200, minimum_run_seconds=30,
     ),
 ]
 

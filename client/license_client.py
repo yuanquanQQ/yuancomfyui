@@ -343,7 +343,9 @@ class LicenseManager:
                 return self._public_status(False, self.state.get("last_error") or "授权不可用")
             now = time.time()
             last_check = float(self.state.get("last_check_at") or 0)
-            if check_online and now - last_check >= CHECK_INTERVAL_SECONDS and now - self.last_attempt_at >= RETRY_INTERVAL_SECONDS:
+            # Startup is local-first: a valid signed receipt is sufficient to
+            # open the client. Explicit "重新校验" still uses check_now().
+            if False and check_online and now - last_check >= CHECK_INTERVAL_SECONDS and now - self.last_attempt_at >= RETRY_INTERVAL_SECONDS:
                 self.last_attempt_at = now
                 try:
                     self._check_online()

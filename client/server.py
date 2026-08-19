@@ -32,20 +32,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger("server")
 
-# ---- Portable root resolution -------------------------------------------
-# When frozen by PyInstaller, sys._MEIPASS is the temp extraction directory
-# (read-only, holds bundled static files).  The EXE directory is used for
-# mutable data (profiles, outputs, data/).  In dev mode both are the same.
+# ---- Application root resolution ----------------------------------------
+# Bundled assets live in PyInstaller's extraction directory. Installed builds
+# keep mutable state beside the executable so a portable/install-directory
+# deployment keeps license, profiles and user files on the selected drive.
 if getattr(sys, "frozen", False):
     BUNDLE_ROOT = Path(sys._MEIPASS)
-    APP_ROOT = Path(sys.executable).resolve().parent
+    INSTALL_ROOT = Path(sys.executable).resolve().parent
+    configured_data_root = os.environ.get("YUNCOMFYUI_DATA_DIR", "").strip()
+    if configured_data_root:
+        APP_ROOT = Path(configured_data_root).expanduser().resolve()
+    else:
+        APP_ROOT = INSTALL_ROOT
 else:
     BUNDLE_ROOT = Path(__file__).resolve().parent
+    INSTALL_ROOT = BUNDLE_ROOT
     APP_ROOT = BUNDLE_ROOT
+
+
+def _migrate_legacy_install_data(legacy_root: Path, target_root: Path) -> None:
+    """Copy legacy install-local state once, without overwriting newer data."""
+    try:
+        if legacy_root.resolve() == target_root.resolve():
+            return
+        marker = target_root / ".legacy_install_data_migrated"
+        if marker.exists():
+            return
+        target_root.mkdir(parents=True, exist_ok=True)
+        for directory_name in (".license", "profiles", "data", "uploads", "outputs", "library", "works"):
+            source = legacy_root / directory_name
+            if not source.is_dir():
+                continue
+            for source_path in source.rglob("*"):
+                destination = target_root / directory_name / source_path.relative_to(source)
+                if source_path.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                elif not destination.exists():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_path, destination)
+        marker.write_text("migrated\n", encoding="ascii")
+    except OSError as exc:
+        logger.warning("Legacy client data migration failed: %s", exc)
+
+
+if getattr(sys, "frozen", False):
+    _legacy_base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "YunComfyUI" / "Client"
+    _migrate_legacy_install_data(_legacy_base, APP_ROOT)
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(APP_ROOT / ".env", override=False)
+    load_dotenv(INSTALL_ROOT / ".env", override=False)
+    if APP_ROOT != INSTALL_ROOT:
+        load_dotenv(APP_ROOT / ".env", override=False)
 except ImportError:
     pass
 
@@ -67,7 +105,11 @@ _workflow_catalog_lock = threading.RLock()
 _workflow_catalog_loaded_at = 0.0
 
 # ---- Ensure required directories exist ----------------------------------
-for _dir in (DATA / "pic", DATA / "ple", DATA / "video", UPLOADS, PROFILES, APP_ROOT / "outputs"):
+LIBRARY = APP_ROOT / "library"
+WORKS = APP_ROOT / "works"
+for _dir in (DATA / "pic", DATA / "ple", DATA / "video", UPLOADS, PROFILES,
+             APP_ROOT / "outputs", LIBRARY / "images", LIBRARY / "videos",
+             LIBRARY / "audio", LIBRARY / "texts", WORKS):
     _dir.mkdir(parents=True, exist_ok=True)
 
 LICENSE = LicenseManager(
@@ -144,6 +186,7 @@ def _new_login_session(account: str) -> dict:
         "stage": "starting",
         "detail": "Opening RunningHub SMS login",
         "error": None,
+        "cancel_requested": False,
         "created_at": now,
         "updated_at": now,
         "frame": None,
@@ -467,6 +510,30 @@ def _scan_files():
         ] if directory.is_dir() else []
     return result
 
+def _library_items():
+    types = {"images": "image", "videos": "video", "audio": "audio", "texts": "text"}
+    items = []
+    for folder, kind in types.items():
+        root = LIBRARY / folder
+        for f in root.rglob("*") if root.exists() else ():
+            if f.is_file():
+                items.append({"id": str(f.relative_to(LIBRARY)).replace("\\", "/"), "name": f.name,
+                              "type": kind, "path": str(f.relative_to(ROOT)).replace("\\", "/"),
+                              "folder": str(f.parent.relative_to(root)).replace("\\", "/") if f.parent != root else "默认",
+                              "size": f.stat().st_size, "updated_at": f.stat().st_mtime})
+    return sorted(items, key=lambda x: x["updated_at"], reverse=True)
+
+def _works_items():
+    out = []
+    for f in WORKS.rglob("*") if WORKS.exists() else ():
+        if f.is_file():
+            parts = f.relative_to(WORKS).parts
+            out.append({"name": f.name, "path": str(f.relative_to(ROOT)).replace("\\", "/"),
+                        "date": parts[0] if parts else "", "phone": parts[1] if len(parts)>1 else "",
+                        "workflow": parts[2] if len(parts)>2 else "", "size": f.stat().st_size,
+                        "updated_at": f.stat().st_mtime})
+    return sorted(out, key=lambda x: x["updated_at"], reverse=True)
+
 
 def _resolve_material(value: str | None, category: str, required=True) -> str | None:
     if not value:
@@ -489,7 +556,7 @@ def _resolve_uploaded_material(value: str | None, required=True) -> str | None:
     candidate = Path(raw)
     path = (candidate if candidate.is_absolute() else ROOT / raw).resolve()
     if not path.is_file() or not any(
-        path.is_relative_to(base.resolve()) for base in (UPLOADS, DATA)
+        path.is_relative_to(base.resolve()) for base in (UPLOADS, DATA, LIBRARY)
     ):
         raise ValueError("素材必须来自工作台上传或素材目录")
     return str(path)
@@ -655,11 +722,17 @@ def _run_task(task_id: str, account: str) -> dict:
             output_dir=task["output_dir"],
             timeout=workflow["timeout"],
         )
+        with _tasks_lock:
+            if _tasks.get(task_id, {}).get("cancel_requested"):
+                return {"status": "cancelled", "error": "任务已取消"}
         files = [str(Path(f).relative_to(ROOT)).replace("\\", "/") for f in (result or [])]
         if not files:
             raise RuntimeError("工作流结束，但没有保存到输出文件")
         return {"status": "done", "files": files}
     except Exception as exc:
+        with _tasks_lock:
+            if _tasks.get(task_id, {}).get("cancel_requested"):
+                return {"status": "cancelled", "error": "任务已取消"}
         logger.exception("[%s] Failed on account=%s", task_id, account)
         return {"status": "failed", "error": str(exc)}
 
@@ -799,7 +872,7 @@ def _dispatch_tasks():
                 "stage": "starting",
                 "stage_detail": "等待执行线程启动",
                 "heartbeat_at": time.time(),
-                "output_dir": str(APP_ROOT / "outputs" / account),
+                "output_dir": str(WORKS / time.strftime("%Y-%m-%d") / (cfg.get("phone") or account) / task.get("workflow_key", "workflow")),
             })
             try:
                 future = _executor.submit(_run_task, task_id, account)
@@ -889,7 +962,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return None
             return session
 
-    def _upload_file(self):
+    def _upload_file(self, library=False):
         length = int(self.headers.get("Content-Length", 0))
         if length <= 0:
             raise ValueError("上传文件为空")
@@ -905,10 +978,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ".png", ".jpg", ".jpeg", ".webp", ".bmp",
             ".mp4", ".mov", ".webm", ".avi", ".mkv",
             ".mp3", ".wav", ".m4a", ".aac", ".flac",
+            ".txt", ".md",
         }
         if suffix not in allowed:
             raise ValueError("仅支持常见图片、视频或音频文件")
-        target = UPLOADS / f"{uuid.uuid4().hex}{suffix}"
+        if library:
+            category = parse_qs(urlparse(self.path).query).get("category", [""])[0]
+            folder = {"image": "images", "video": "videos", "audio": "audio", "text": "texts"}.get(category)
+            if not folder:
+                folder = "texts" if suffix in {".txt", ".md"} else ("videos" if suffix in {".mp4", ".mov", ".webm", ".avi", ".mkv"} else ("audio" if suffix in {".mp3", ".wav", ".m4a", ".aac", ".flac"} else "images"))
+            target = LIBRARY / folder / f"{uuid.uuid4().hex}{suffix}"
+        else:
+            target = UPLOADS / f"{uuid.uuid4().hex}{suffix}"
         target.write_bytes(content)
         return self._json({
             "name": filename,
@@ -963,8 +1044,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if target.is_relative_to((APP_ROOT / "outputs").resolve()):
                 return self._send_file(target)
             return self._json({"error": "Forbidden"}, 403)
+        if path.startswith("/works/") or path.startswith("/library/"):
+            target = (APP_ROOT / path.lstrip("/")).resolve()
+            base = WORKS.resolve() if path.startswith("/works/") else LIBRARY.resolve()
+            if target.is_relative_to(base):
+                return self._send_file(target)
+            return self._json({"error": "Forbidden"}, 403)
         if path == "/api/files":
             return self._json(_scan_files())
+        if path == "/api/library":
+            return self._json({"items": _library_items()})
+        if path == "/api/works":
+            return self._json({"items": _works_items()})
         if path == "/api/workflows":
             try:
                 return self._json(_public_workflows())
@@ -1088,6 +1179,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
             if path == "/api/uploads":
                 return self._upload_file()
+            if path == "/api/library/upload":
+                return self._upload_file(library=True)
             if path == "/api/internal/login/frame":
                 return self._internal_login_frame()
             return self._do_post()
@@ -1102,6 +1195,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         try:
             path = unquote(urlparse(self.path).path)
+            if path.startswith("/api/library/"):
+                rel = unquote(path[len("/api/library/"):])
+                target = (LIBRARY / rel).resolve()
+                if not target.is_relative_to(LIBRARY.resolve()) or not target.is_file():
+                    return self._json({"error": "素材不存在"}, 404)
+                target.unlink()
+                return self._json({"status": "deleted"})
             prefix = "/api/accounts/"
             if not path.startswith(prefix):
                 return self._json({"error": "Not found"}, 404)
@@ -1154,6 +1254,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         data = self._body()
+
+        if path == "/api/tasks/cancel":
+            task_id = str(data.get("task_id") or "")
+            with _tasks_lock:
+                task = _tasks.get(task_id)
+                if not task:
+                    raise ValueError("任务不存在")
+                if task.get("status") == "queued":
+                    try: _task_queue.remove(task_id)
+                    except ValueError: pass
+                    task.update({"status": "cancelled", "stage": "cancelled", "stage_detail": "任务已取消", "completed_at": time.time(), "error": "任务已取消"})
+                    return self._json(_public_task(task))
+                if task.get("status") != "running":
+                    return self._json(_public_task(task))
+                task["cancel_requested"] = True
+                runner = task.get("runner")
+            if runner:
+                runner.stop()
+            return self._json({"status": "cancelling", "task_id": task_id})
 
         if path == "/api/license/activate":
             code = str(data.get("code") or "").strip()

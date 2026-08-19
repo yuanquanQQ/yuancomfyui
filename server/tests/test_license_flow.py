@@ -97,7 +97,7 @@ def test_complete_license_lifecycle(tmp_path):
         )
         assert catalog.status_code == 200, catalog.text
         assert catalog.json()["default_workflow_key"] == "person_replace"
-        assert len(catalog.json()["workflows"]) == 11
+        assert len(catalog.json()["workflows"]) == 13
 
         renewal_card = generate_card(client, headers, "quarterly")
         original_expiry = datetime.fromisoformat(activated["expires_at"])

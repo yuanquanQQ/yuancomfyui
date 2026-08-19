@@ -37,14 +37,13 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Source: "..\client\dist\yuncomfyui.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
+Name: "{app}\.license"; Permissions: users-modify
+Name: "{app}\profiles"; Permissions: users-modify
 Name: "{app}\data"; Permissions: users-modify
-Name: "{app}\data\pic"; Permissions: users-modify
-Name: "{app}\data\ple"; Permissions: users-modify
-Name: "{app}\data\video"; Permissions: users-modify
 Name: "{app}\uploads"; Permissions: users-modify
 Name: "{app}\outputs"; Permissions: users-modify
-Name: "{app}\profiles"; Permissions: users-modify
-Name: "{app}\.license"; Permissions: users-modify
+Name: "{app}\library"; Permissions: users-modify
+Name: "{app}\works"; Permissions: users-modify
 
 [Icons]
 Name: "{group}\YunComfyUI Client"; Filename: "{app}\{#AppExeName}"
