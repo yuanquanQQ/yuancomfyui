@@ -102,11 +102,13 @@ DEFAULT_WORKFLOW_KEY = ""
 DEFAULT_WORKFLOW_NAME = "工作流"
 WORKFLOWS: dict[str, dict] = {}
 _workflow_catalog_lock = threading.RLock()
+_library_lock = threading.RLock()
 _workflow_catalog_loaded_at = 0.0
 
 # ---- Ensure required directories exist ----------------------------------
 LIBRARY = APP_ROOT / "library"
 WORKS = APP_ROOT / "works"
+LIBRARY_META = LIBRARY / ".metadata.json"
 for _dir in (DATA / "pic", DATA / "ple", DATA / "video", UPLOADS, PROFILES,
              APP_ROOT / "outputs", LIBRARY / "images", LIBRARY / "videos",
              LIBRARY / "audio", LIBRARY / "texts", WORKS):
@@ -513,21 +515,25 @@ def _scan_files():
 def _library_items():
     types = {"images": "image", "videos": "video", "audio": "audio", "texts": "text"}
     items = []
+    metadata = _read_json(LIBRARY_META, {})
     for folder, kind in types.items():
         root = LIBRARY / folder
         for f in root.rglob("*") if root.exists() else ():
-            if f.is_file():
+            if f.is_file() and f != LIBRARY_META:
                 preview = ""
                 if kind == "text":
                     try:
                         preview = f.read_text(encoding="utf-8", errors="replace")[:800]
                     except OSError:
                         pass
-                items.append({"id": str(f.relative_to(LIBRARY)).replace("\\", "/"), "name": f.name,
+                item_id = str(f.relative_to(LIBRARY)).replace("\\", "/")
+                item_meta = metadata.get(item_id, {})
+                items.append({"id": item_id, "name": f.name,
                               "type": kind, "path": str(f.relative_to(ROOT)).replace("\\", "/"),
                               "folder": str(f.parent.relative_to(root)).replace("\\", "/") if f.parent != root else "默认",
                               "size": f.stat().st_size, "updated_at": f.stat().st_mtime,
-                              "preview": preview})
+                              "preview": preview, "tags": item_meta.get("tags", []),
+                              "imported_at": item_meta.get("imported_at", f.stat().st_mtime)})
     return sorted(items, key=lambda x: x["updated_at"], reverse=True)
 
 def _works_items():
@@ -1003,6 +1009,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             target = UPLOADS / f"{uuid.uuid4().hex}{suffix}"
         target.write_bytes(content)
+        if library:
+            with _library_lock:
+                metadata = _read_json(LIBRARY_META, {})
+                item_id = str(target.relative_to(LIBRARY)).replace("\\", "/")
+                metadata[item_id] = {"tags": [], "imported_at": time.time()}
+                _write_json(LIBRARY_META, metadata)
         return self._json({
             "name": filename,
             "path": str(target.relative_to(ROOT)).replace("\\", "/"),
@@ -1266,6 +1278,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         data = self._body()
+
+        if path == "/api/library/manage":
+            ids = data.get("ids") or []
+            if not isinstance(ids, list) or not ids:
+                raise ValueError("请选择素材")
+            action = str(data.get("action") or "")
+            changed = []
+            with _library_lock:
+                metadata = _read_json(LIBRARY_META, {})
+                for item_id in ids:
+                    source = (LIBRARY / unquote(str(item_id))).resolve()
+                    if not source.is_relative_to(LIBRARY.resolve()) or not source.is_file() or source == LIBRARY_META:
+                        continue
+                    current_id = str(source.relative_to(LIBRARY)).replace("\\", "/")
+                    if action == "delete":
+                        source.unlink()
+                        metadata.pop(current_id, None)
+                        changed.append(current_id)
+                    elif action == "tags":
+                        tags = [str(tag).strip()[:30] for tag in (data.get("tags") or []) if str(tag).strip()][:10]
+                        metadata.setdefault(current_id, {"imported_at": source.stat().st_mtime})["tags"] = tags
+                        changed.append(current_id)
+                    elif action == "rename":
+                        if len(ids) != 1:
+                            raise ValueError("改名时只能选择一个素材")
+                        name = Path(str(data.get("name") or "")).name.strip()
+                        if not name:
+                            raise ValueError("请输入新名称")
+                        if Path(name).suffix.lower() != source.suffix.lower():
+                            name += source.suffix
+                        target = source.with_name(name).resolve()
+                        if not target.is_relative_to(source.parent.resolve()) or target.exists():
+                            raise ValueError("名称无效或已存在")
+                        source.rename(target)
+                        new_id = str(target.relative_to(LIBRARY)).replace("\\", "/")
+                        metadata[new_id] = metadata.pop(current_id, {"tags": [], "imported_at": time.time()})
+                        changed.append(new_id)
+                    else:
+                        raise ValueError("不支持的素材操作")
+                _write_json(LIBRARY_META, metadata)
+            return self._json({"status": "ok", "changed": changed})
 
         if path == "/api/tasks/cancel":
             task_id = str(data.get("task_id") or "")
