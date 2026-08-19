@@ -987,7 +987,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             folder = {"image": "images", "video": "videos", "audio": "audio", "text": "texts"}.get(category)
             if not folder:
                 folder = "texts" if suffix in {".txt", ".md"} else ("videos" if suffix in {".mp4", ".mov", ".webm", ".avi", ".mkv"} else ("audio" if suffix in {".mp3", ".wav", ".m4a", ".aac", ".flac"} else "images"))
-            target = LIBRARY / folder / f"{uuid.uuid4().hex}{suffix}"
+            safe_stem = re.sub(r"[^\w\-.\u4e00-\u9fff]+", "_", Path(filename).stem).strip("._") or "material"
+            target = LIBRARY / folder / f"{safe_stem}{suffix}"
+            counter = 2
+            while target.exists():
+                target = LIBRARY / folder / f"{safe_stem}_{counter}{suffix}"
+                counter += 1
         else:
             target = UPLOADS / f"{uuid.uuid4().hex}{suffix}"
         target.write_bytes(content)
