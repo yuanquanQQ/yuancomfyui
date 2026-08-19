@@ -733,6 +733,8 @@ def _run_task(task_id: str, account: str) -> dict:
         with _tasks_lock:
             if task_id in _tasks:
                 _tasks[task_id]["runner"] = runner
+                if _tasks[task_id].get("cancel_requested"):
+                    runner.request_cancel()
         result = runner.run(
             inputs=task["input_paths"],
             mode="plus",
@@ -763,8 +765,12 @@ def _finish_task(task_id: str, account: str, future: Future):
         task = _tasks.get(task_id)
         if task:
             task["status"] = result.get("status", "failed")
-            task["stage"] = "completed" if task["status"] == "done" else "failed"
-            task["stage_detail"] = "任务已完成" if task["status"] == "done" else "任务失败"
+            if task["status"] == "done":
+                task["stage"], task["stage_detail"] = "completed", "任务已完成"
+            elif task["status"] == "cancelled":
+                task["stage"], task["stage_detail"] = "cancelled", "任务已取消"
+            else:
+                task["stage"], task["stage_detail"] = "failed", "任务失败"
             task["heartbeat_at"] = time.time()
             task["completed_at"] = time.time()
             task["files"] = result.get("files", [])
@@ -1339,10 +1345,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if task.get("status") != "running":
                     return self._json(_public_task(task))
                 task["cancel_requested"] = True
+                task.update({
+                    "status": "cancelled", "stage": "cancelled",
+                    "stage_detail": "正在取消任务", "completed_at": time.time(),
+                    "error": "任务已取消",
+                })
                 runner = task.get("runner")
             if runner:
-                runner.stop()
-            return self._json({"status": "cancelling", "task_id": task_id})
+                runner.request_cancel()
+            return self._json({"status": "cancelled", "task_id": task_id})
 
         if path == "/api/license/activate":
             code = str(data.get("code") or "").strip()

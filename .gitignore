@@ -18,6 +18,7 @@ login_failure.*
 login_view.png
 login_command.json
 login_inputs/
+.legacy_install_data_migrated
 
 # User media and generated results
 data/

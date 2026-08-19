@@ -14,18 +14,36 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
     assert by_key("krea2_realistic_4k")["spec"]["texts"][0]["node_id"] == "64"
     assert by_key("krea2_realistic_4k")["spec"]["outputs"][0]["node_id"] == "83"
     assert by_key("minimax_h3_dual_stage")["spec"]["uploads"][0]["node_id"] == "137"
+    assert by_key("minimax_h3_dual_stage")["inputs"][1]["input_type"] == "text"
+    assert by_key("minimax_h3_dual_stage")["spec"]["texts"][0] == {
+        "key": "prompt", "node_id": "138", "widget": "value",
+        "label": "提示词", "required": True,
+    }
     assert by_key("minimax_h3_dual_stage")["spec"]["outputs"][0]["node_id"] == "168"
     assert by_key("seedvr2_upscale")["spec"]["uploads"][0]["node_id"] == "15"
     assert by_key("seedvr2_upscale")["spec"]["outputs"][0]["node_id"] == "101"
     assert by_key("minimax_h3_four_view")["spec"]["uploads"][0]["node_id"] == "17"
     assert by_key("minimax_h3_four_view")["spec"]["outputs"][0]["node_id"] == "5"
     assert by_key("auto_storyboard_short_video")["spec"]["uploads"][0]["node_id"] == "41"
-    assert by_key("auto_storyboard_short_video")["spec"]["texts"][0]["node_id"] == "127"
+    assert by_key("auto_storyboard_short_video")["spec"]["texts"][0] == {
+        "key": "request", "node_id": "127", "widget": "text",
+        "label": "分镜数量与要求", "required": True,
+    }
     assert by_key("auto_storyboard_short_video")["spec"]["outputs"][0]["node_id"] == "114"
     assert [item["node_id"] for item in by_key("firered_ecommerce_tryon")["spec"]["uploads"]] == ["207", "208"]
+    assert by_key("firered_ecommerce_tryon")["inputs"][2]["input_type"] == "text"
+    assert by_key("firered_ecommerce_tryon")["spec"]["texts"][0] == {
+        "key": "prompt", "node_id": "264", "widget": "prompt",
+        "label": "换装要求", "required": True,
+    }
     assert by_key("firered_ecommerce_tryon")["spec"]["outputs"][0]["node_id"] == "253"
     assert [item["node_id"] for item in by_key("ltx23_hd_digital_human")["spec"]["uploads"]] == ["517", "607"]
     assert by_key("ltx23_hd_digital_human")["spec"]["outputs"][0]["node_id"] == "140"
+    assert by_key("scail_4k_pose_background")["inputs"][2]["input_type"] == "text"
+    assert by_key("scail_4k_pose_background")["spec"]["texts"][0] == {
+        "key": "prompt", "node_id": "424", "widget": "编辑文本",
+        "label": "迁移要求", "required": True,
+    }
 
 
 def test_all_catalog_entries_have_runnable_server_configuration():

@@ -128,6 +128,18 @@ class BrowserRunner:
         self.screenshot_data: Optional[bytes] = None
         self.screenshot_error: Optional[str] = None
         self._screenshot_in_progress = False
+        self.cancel_requested = threading.Event()
+
+    def request_cancel(self):
+        """Ask the owning worker thread to stop at its next safe checkpoint."""
+        self.cancel_requested.set()
+        if not self.screenshot_ready.is_set():
+            self.screenshot_error = "Task was cancelled"
+            self.screenshot_ready.set()
+
+    def _raise_if_cancelled(self):
+        if self.cancel_requested.is_set():
+            raise RuntimeError("任务已取消")
 
     def _report_progress(self, stage, detail):
         logger.info("Stage %s: %s", stage, detail)
@@ -156,12 +168,14 @@ class BrowserRunner:
 
     def _open_post_workflow(self):
         """Open a stable RunningHub post and enter its current workflow."""
+        self._raise_if_cancelled()
         url = f"https://www.runninghub.cn/post/{self.post_id}"
         logger.info("Navigating to post %s", url)
         self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
         run_button = self._page.get_by_text("运行工作流", exact=True).last
         for attempt in range(1, 4):
+            self._raise_if_cancelled()
             self._dismiss_rife_popup()
             self._dismiss_popups()
             try:
@@ -227,6 +241,7 @@ class BrowserRunner:
         _ensure_playwright_browsers_path()
 
         self._playwright = sync_playwright().start()
+        self._raise_if_cancelled()
         launch_args = [
             "--no-sandbox",
             "--disable-blink-features=AutomationControlled",
@@ -263,6 +278,7 @@ class BrowserRunner:
         # localStorage entries are restored after first navigation.
         self._inject_saved_state()
         self._page = self._context.new_page()
+        self._raise_if_cancelled()
 
         # Check login before navigating — if the session is expired,
         # RunningHub shows a login page without the ComfyUI iframe.
@@ -276,6 +292,7 @@ class BrowserRunner:
         last_error = None
 
         for url in self._candidate_workflow_urls():
+            self._raise_if_cancelled()
             try:
                 logger.info("Navigating to %s", url)
                 self._page.goto(url, wait_until="networkidle", timeout=60000)
@@ -295,6 +312,7 @@ class BrowserRunner:
             logger.info("  Frame #%d: url=%s", i, (f.url or "(empty)")[:120])
 
         for attempt in range(30):
+            self._raise_if_cancelled()
             elapsed = (attempt + 1) * 2
             for frame in self._page.frames:
                 try:
@@ -517,6 +535,7 @@ class BrowserRunner:
         logger.info("Not logged in — waiting for manual login (timeout=%ds)...", timeout)
         start = time.time()
         while time.time() - start < timeout:
+            self._raise_if_cancelled()
             try:
                 for c in self._context.cookies():
                     if valid_access_token(c):
@@ -2092,9 +2111,11 @@ class BrowserRunner:
         # Validate all required logical inputs before opening a browser.
         self.workflow_spec.resolve_uploads(inputs)
         self.workflow_spec.resolve_texts(inputs)
+        self._raise_if_cancelled()
 
         try:
             self.start()
+            self._raise_if_cancelled()
             self._report_progress("starting", "正在打开工作流")
 
             # Dismiss any notice/announcement modals that block the UI
@@ -2103,8 +2124,10 @@ class BrowserRunner:
             self._page.wait_for_timeout(500)
 
             with _upload_lock:
+                self._raise_if_cancelled()
                 self.upload_inputs(inputs)
                 self.set_text_inputs(inputs)
+            self._raise_if_cancelled()
 
             # ── Dismiss any stale completion popup from a previous run ──
             # If the browser session was reused or the page shows a leftover
@@ -2127,6 +2150,7 @@ class BrowserRunner:
             status = None
 
             while attempt <= max_retries:
+                self._raise_if_cancelled()
                 if attempt > 0:
                     logger.info("Retry attempt %d/%d after OOM error",
                                 attempt, max_retries)
@@ -2154,6 +2178,7 @@ class BrowserRunner:
                 poll_interval = 2
                 deadline = time.time() + timeout
                 while time.time() < deadline:
+                    self._raise_if_cancelled()
                     elapsed = time.time() - (deadline - timeout)
                     if int(elapsed) % 30 < poll_interval:
                         detail = (
@@ -2218,7 +2243,8 @@ class BrowserRunner:
                             self.screenshot_requested.clear()
                             self.screenshot_ready.set()
 
-                    time.sleep(poll_interval)
+                    if self.cancel_requested.wait(poll_interval):
+                        self._raise_if_cancelled()
 
                 if status == "done":
                     break  # exit retry loop
@@ -2240,6 +2266,7 @@ class BrowserRunner:
             self._dismiss_comfy_popups()
             self._page.wait_for_timeout(3000)
 
+            self._raise_if_cancelled()
             files = self.download_outputs(output_dir)
             self._report_progress("completed", "结果已保存")
             return files

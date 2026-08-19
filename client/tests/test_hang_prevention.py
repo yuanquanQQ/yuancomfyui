@@ -233,8 +233,72 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual("排队超时", task["stage_detail"])
         self.assertNotIn("task_a", server._task_queue)
 
+    def test_cancelled_task_releases_account_without_retry(self):
+        self.add_account("account_a")
+        self.add_task("task_a")
+        task = server._tasks["task_a"]
+        task.update({"status": "cancelled", "account": "account_a"})
+        server._account_busy.add("account_a")
+
+        server._finish_task(
+            "task_a", "account_a",
+            ImmediateFuture({"status": "cancelled", "error": "任务已取消"}),
+        )
+
+        self.assertEqual("cancelled", task["status"])
+        self.assertEqual("cancelled", task["stage"])
+        self.assertNotIn("account_a", server._account_busy)
+        self.assertFalse(any(
+            item.get("original_task_id") == "task_a"
+            for item in server._tasks.values()
+        ))
+
+    def test_cancel_http_marks_running_task_and_notifies_runner(self):
+        class FakeRunner:
+            cancelled = False
+
+            def request_cancel(self):
+                self.cancelled = True
+
+        runner = FakeRunner()
+        self.add_task("task_a")
+        server._tasks["task_a"].update({
+            "status": "running", "runner": runner,
+        })
+        server._task_queue.remove("task_a")
+        httpd = server.http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = urllib_request.Request(
+                f"http://127.0.0.1:{httpd.server_address[1]}/api/tasks/cancel",
+                data=json.dumps({"task_id": "task_a"}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            payload = json.loads(urllib_request.urlopen(request, timeout=2).read())
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual("cancelled", payload["status"])
+        self.assertEqual("cancelled", server._tasks["task_a"]["status"])
+        self.assertTrue(server._tasks["task_a"]["cancel_requested"])
+        self.assertTrue(runner.cancelled)
+
 
 class BrowserUploadTests(unittest.TestCase):
+    def test_cancel_request_is_observed_by_worker_checkpoint(self):
+        runner = BrowserRunner()
+
+        runner.request_cancel()
+
+        self.assertTrue(runner.cancel_requested.is_set())
+        with self.assertRaisesRegex(RuntimeError, "任务已取消"):
+            runner._raise_if_cancelled()
+
     def test_workflow_spec_resolves_fallback_and_optional_inputs(self):
         spec = WorkflowSpec(
             name="test",

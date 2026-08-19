@@ -112,9 +112,12 @@ WORKFLOW_CATALOG = [
     workflow(
         "scail_4k_pose_background", "极境 4K 姿势迁移 · 背景替换", "将人物迁移到背景场景并增强姿势与画面一致性",
         "image", "2088160851734913026", "person",
-        [input_field("background", "背景图"), input_field("person", "人物图")],
+        [input_field("background", "背景图"), input_field("person", "人物图"),
+         input_field("prompt", "迁移要求", "text", "text")],
         [upload("background", 393, "背景图"), upload("person", 396, "人物图")],
-        [output(391, "image", "save image", "save preview")], minimum_run_seconds=30,
+        [output(391, "image", "save image", "save preview")],
+        texts=[{"key": "prompt", "node_id": "424", "widget": "编辑文本", "label": "迁移要求", "required": True}],
+        minimum_run_seconds=30,
     ),
     workflow(
         "krea2_realistic_4k", "Krea2 超写实 4K 文生图", "输入画面提示词，生成超写实 4K 图片",
@@ -142,9 +145,12 @@ WORKFLOW_CATALOG = [
     workflow(
         "firered_ecommerce_tryon", "极境电商换装 · FireRed", "根据人物图与服装参考图生成保持人物特征的电商换装效果",
         "image", "2089732224055861249", "person",
-        [input_field("person", "人物图"), input_field("garment", "服装参考图")],
+        [input_field("person", "人物图"), input_field("garment", "服装参考图"),
+         input_field("prompt", "换装要求", "text", "text")],
         [upload("person", 207, "人物图"), upload("garment", 208, "服装参考图")],
-        [output(253, "image", "save image", "save preview")], timeout=7200, minimum_run_seconds=30,
+        [output(253, "image", "save image", "save preview")],
+        texts=[{"key": "prompt", "node_id": "264", "widget": "prompt", "label": "换装要求", "required": True}],
+        timeout=7200, minimum_run_seconds=30,
     ),
     workflow(
         "minimax_h3_four_view", "MiniMax H3 辅助四视图生成", "根据一张角色图片生成面部近景及正面、侧面、背面四视图",
@@ -155,8 +161,11 @@ WORKFLOW_CATALOG = [
     workflow(
         "minimax_h3_dual_stage", "Minimax H3 二采重绘 V2", "上传图片并生成 Minimax H3 二次采样重绘视频",
         "video", "2089228867037913090", "source",
-        [input_field("source", "输入图片")], [upload("source", 137, "输入图片")],
-        [output(168, "video", "save video", "save preview")], timeout=7200,
+        [input_field("source", "输入图片"), input_field("prompt", "提示词", "text", "text")],
+        [upload("source", 137, "输入图片")],
+        [output(168, "video", "save video", "save preview")],
+        texts=[{"key": "prompt", "node_id": "138", "widget": "value", "label": "提示词", "required": True}],
+        timeout=7200,
     ),
     workflow(
         "seedvr2_upscale", "SeedVR2 万物高清放大", "上传图片并生成 SeedVR2 高清放大结果",
