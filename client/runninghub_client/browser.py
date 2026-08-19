@@ -104,7 +104,7 @@ class BrowserRunner:
     """Playwright-based browser automation for RunningHub workflow."""
 
     def __init__(self, *, headless=True, slow_mo=300, user_data_dir=None,
-                 workflow_url=None, workflow_id=None,
+                 workflow_url=None, workflow_id=None, post_id=None,
                  workflow_spec: Optional[WorkflowSpec] = None,
                  progress_callback: Optional[Callable[[str, str], None]] = None):
         self.headless = headless
@@ -113,6 +113,7 @@ class BrowserRunner:
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         self.workflow_url = workflow_url
         self.workflow_id = workflow_id
+        self.post_id = post_id
         self.workflow_spec = workflow_spec
         self.progress_callback = progress_callback
         self._browser = None
@@ -152,6 +153,41 @@ class BrowserRunner:
             f"https://www.runninghub.cn/workflow/{self.workflow_id}?source=workspace",
             f"https://www.runninghub.cn/workflow/{self.workflow_id}",
         ]
+
+    def _open_post_workflow(self):
+        """Open a stable RunningHub post and enter its current workflow."""
+        url = f"https://www.runninghub.cn/post/{self.post_id}"
+        logger.info("Navigating to post %s", url)
+        self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+        run_button = self._page.get_by_text("运行工作流", exact=True).last
+        try:
+            run_button.wait_for(state="visible", timeout=30000)
+        except Exception as exc:
+            body = self._page.locator("body").inner_text(timeout=5000)
+            if "登录" in body:
+                raise RuntimeError("账号登录状态已失效，请重新登录") from exc
+            raise RuntimeError("Post 页面没有找到“运行工作流”按钮") from exc
+
+        pages_before = set(self._context.pages)
+        run_button.click(timeout=15000)
+        self._page.wait_for_timeout(1500)
+        new_pages = [page for page in self._context.pages if page not in pages_before]
+        if new_pages:
+            self._page = new_pages[-1]
+            self._page.wait_for_load_state("domcontentloaded", timeout=60000)
+
+        try:
+            body = self._page.locator("body").inner_text(timeout=5000)
+            if "验证码登录" in body or "扫码登录" in body:
+                raise RuntimeError("账号登录状态已失效，请重新登录")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+
+        self._comfy = self._find_comfy_frame()
+        logger.info("Workflow loaded from post %s", self.post_id)
 
     # =================================================================
     # Setup / Teardown
@@ -220,6 +256,10 @@ class BrowserRunner:
         # RunningHub shows a login page without the ComfyUI iframe.
         if not self.ensure_logged_in():
             raise RuntimeError("账号登录已失效，请重新登录")
+
+        if self.post_id:
+            self._open_post_workflow()
+            return
 
         last_error = None
 

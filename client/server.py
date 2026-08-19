@@ -286,12 +286,14 @@ def _refresh_workflow_catalog(force=False) -> None:
             if not isinstance(item, dict):
                 raise LicenseError("工作流服务返回的数据无效")
             key = str(item.get("key") or "").strip()
+            post_id = str(item.get("post_id") or "").strip()
             workflow_id = str(item.get("workflow_id") or "").strip()
             if not re.fullmatch(r"[a-z0-9_]{1,64}", key):
                 raise LicenseError("工作流标识无效")
-            if not re.fullmatch(r"\d{6,30}", workflow_id):
+            if not re.fullmatch(r"\d{6,30}", post_id or workflow_id):
                 raise LicenseError(f"工作流 {key} 的 RunningHub ID 无效")
             workflow = dict(item)
+            workflow["post_id"] = post_id
             workflow["workflow_id"] = workflow_id
             workflow["inputs"] = tuple(workflow.get("inputs") or ())
             workflow["timeout"] = int(workflow.get("timeout") or 3000)
@@ -322,9 +324,9 @@ def _workflow_config(key: str | None, require_configured=True) -> dict:
     workflow = WORKFLOWS.get(workflow_key)
     if not workflow:
         raise ValueError("未知的工作流")
-    if require_configured and not workflow["workflow_id"]:
+    if require_configured and not (workflow.get("post_id") or workflow.get("workflow_id")):
         raise ValueError(
-            f"{workflow['name']} 尚未配置 RunningHub Workflow ID"
+            f"{workflow['name']} 尚未配置 RunningHub Post/Workflow ID"
         )
     return workflow
 
@@ -337,7 +339,7 @@ def _public_workflows() -> list[dict]:
             "name": workflow["name"],
             "description": workflow["description"],
             "category": workflow["category"],
-            "configured": bool(workflow["workflow_id"]),
+            "configured": bool(workflow.get("post_id") or workflow.get("workflow_id")),
             "inputs": list(workflow["inputs"]),
         }
         for workflow in WORKFLOWS.values()
@@ -666,6 +668,7 @@ def _new_task(
         "account": None,
         "phone": None,
         "workflow_id": None,
+        "post_id": None,
         "input_files": input_files,
         "input_paths": dict(input_paths),
         "created_at": created_at,
@@ -713,13 +716,14 @@ def _run_task(task_id: str, account: str) -> dict:
     with _tasks_lock:
         task = dict(_tasks[task_id])
     workflow = _workflow_config(task.get("workflow_key"))
-    logger.info("[%s] Running on account=%s workflow=%s", task_id, account,
-                task["workflow_id"])
+    logger.info("[%s] Running on account=%s post=%s workflow=%s", task_id, account,
+                task.get("post_id"), task.get("workflow_id"))
     try:
         runner = BrowserRunner(
             headless=True,
             slow_mo=0,
             workflow_id=task["workflow_id"],
+            post_id=task.get("post_id"),
             workflow_spec=workflow["spec"],
             user_data_dir=str(PROFILES / account),
             progress_callback=lambda stage, detail: _update_task_progress(
@@ -881,6 +885,7 @@ def _dispatch_tasks():
                 "account": account,
                 "phone": cfg.get("phone") or account,
                 "workflow_id": workflow["workflow_id"],
+                "post_id": workflow.get("post_id"),
                 "started_at": time.time(),
                 "stage": "starting",
                 "stage_detail": "等待执行线程启动",
