@@ -6,10 +6,10 @@ rem ============================================================
 
 cd /d "%~dp0"
 
-set "APP_PYTHON=%~dp0.venv-local\Scripts\python.exe"
-if not exist "%APP_PYTHON%" set "APP_PYTHON=%~dp0.venv\Scripts\python.exe"
+set "APP_PYTHON=%~dp0..\.venv\Scripts\python.exe"
 if not exist "%APP_PYTHON%" set "APP_PYTHON=%~dp0..\.venv-local\Scripts\python.exe"
-if not exist "%APP_PYTHON%" set "APP_PYTHON=%~dp0..\.venv\Scripts\python.exe"
+if not exist "%APP_PYTHON%" set "APP_PYTHON=%~dp0.venv-local\Scripts\python.exe"
+if not exist "%APP_PYTHON%" set "APP_PYTHON=%~dp0.venv\Scripts\python.exe"
 if not exist "%APP_PYTHON%" (
   echo   ERROR: Python environment is missing. Run setup.bat first.
   pause

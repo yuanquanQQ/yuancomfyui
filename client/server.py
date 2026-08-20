@@ -98,6 +98,13 @@ LOGIN_WORKERS = 2
 QUEUE_TIMEOUT_SECONDS = int(os.environ.get("QUEUE_TIMEOUT_SECONDS", "86400"))
 MAX_TASK_REQUEUES = int(os.environ.get("MAX_TASK_REQUEUES", "2"))
 
+
+def _browser_headless() -> bool:
+    """Choose browser visibility; packaged clients default to headless."""
+    default = "1" if getattr(sys, "frozen", False) else "0"
+    value = os.environ.get("YUNCOMFYUI_HEADLESS", default).strip().lower()
+    return value not in {"0", "false", "no", "off", "headed"}
+
 DEFAULT_WORKFLOW_KEY = ""
 DEFAULT_WORKFLOW_NAME = "工作流"
 WORKFLOWS: dict[str, dict] = {}
@@ -720,7 +727,7 @@ def _run_task(task_id: str, account: str) -> dict:
                 task.get("post_id"), task.get("workflow_id"))
     try:
         runner = BrowserRunner(
-            headless=True,
+            headless=_browser_headless(),
             slow_mo=0,
             workflow_id=task["workflow_id"],
             post_id=task.get("post_id"),

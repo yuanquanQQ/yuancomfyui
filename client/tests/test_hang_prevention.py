@@ -141,6 +141,17 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual({"account_a", "account_b"}, accounts)
         self.assertEqual(accounts, server._account_busy)
 
+    def test_browser_headless_can_be_disabled_for_post_inspection(self):
+        with mock.patch.dict(server.os.environ, {"YUNCOMFYUI_HEADLESS": "0"}, clear=False):
+            self.assertFalse(server._browser_headless())
+        with mock.patch.dict(server.os.environ, {"YUNCOMFYUI_HEADLESS": "1"}, clear=False):
+            self.assertTrue(server._browser_headless())
+
+    def test_packaged_client_defaults_to_headless(self):
+        with mock.patch.dict(server.os.environ, {}, clear=True):
+            with mock.patch.object(server.sys, "frozen", True, create=True):
+                self.assertTrue(server._browser_headless())
+
     def test_failed_task_releases_account_and_dispatches_next(self):
         self.add_account("account_a")
         self.add_task("task_a")
@@ -364,8 +375,9 @@ class BrowserUploadTests(unittest.TestCase):
 
         self.assertEqual([], saved)
         evaluate_args = runner._comfy.evaluate.call_args.args
-        self.assertIn("saveimage", evaluate_args[1])
-        self.assertIn("99", evaluate_args[0])
+        self.assertIn("saveimage", evaluate_args[1]["actions"])
+        self.assertEqual("99", evaluate_args[1]["nodeId"])
+        self.assertEqual("image", evaluate_args[1]["mediaType"])
 
     def test_upload_response_may_be_filename_string(self):
         """Upload API returning a bare JSON string should not crash."""

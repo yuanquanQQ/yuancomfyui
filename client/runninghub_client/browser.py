@@ -1705,6 +1705,21 @@ class BrowserRunner:
         if saved:
             logger.info("Configured output downloads OK: %s", saved)
             return saved
+        # Save directly from the configured node's own media metadata. This
+        # remains scoped to the declared output and cannot capture input media.
+        for output in self.workflow_spec.outputs:
+            try:
+                media_saved = self._download_output_node_media(base_dir, output)
+                if media_saved:
+                    saved.extend(media_saved)
+            except Exception as exc:
+                logger.warning(
+                    "Output node media fallback failed for node %s: %s",
+                    output.node_id, str(exc)[:200],
+                )
+        if saved:
+            logger.info("Configured output node media downloads OK: %s", saved)
+            return saved
         if self.workflow_spec.strict_outputs:
             raise RuntimeError(
                 "Configured output node download failed; refusing to save other nodes"
@@ -1841,6 +1856,57 @@ class BrowserRunner:
         except Exception as exc:
             logger.warning("DOM video extraction failed: %s", exc)
             return saved
+
+    def _download_output_node_media(self, base_dir, output):
+        """Download media URLs owned by one configured output node."""
+        sources = self._comfy.evaluate(
+            """(nodeId) => {
+                const node = app.graph.getNodeById(Number(nodeId));
+                if (!node) return [];
+                const urls = [];
+                for (const image of (Array.isArray(node.imgs) ? node.imgs : [])) {
+                    const src = image && (image.currentSrc || image.src);
+                    if (src) urls.push(src);
+                }
+                for (const item of (Array.isArray(node.images) ? node.images : [])) {
+                    if (!item || !item.filename) continue;
+                    const url = new URL('/view', location.origin);
+                    url.searchParams.set('filename', item.filename);
+                    url.searchParams.set('subfolder', item.subfolder || '');
+                    url.searchParams.set('type', item.type || 'output');
+                    urls.push(url.href);
+                }
+                return [...new Set(urls)];
+            }""",
+            output.node_id,
+        ) or []
+        saved = []
+        for source in dict.fromkeys(sources):
+            if not isinstance(source, str) or not source.startswith("http"):
+                continue
+            try:
+                response = self._page.request.get(source, timeout=120000)
+                body = response.body()
+                content_type = (response.headers.get("content-type") or "").lower()
+                expected = "image" if output.media_type == "image" else "video"
+                if not response.ok or expected not in content_type or len(body) < 10000:
+                    continue
+                suffix = ".png" if output.media_type == "image" else ".mp4"
+                parsed = urllib.parse.urlparse(source)
+                query_name = urllib.parse.parse_qs(parsed.query).get("filename", [""])[0]
+                name = Path(query_name or parsed.path).name or f"output_{int(time.time())}{suffix}"
+                if not Path(name).suffix:
+                    name += suffix
+                destination = base_dir / Path(name).name
+                collision = 1
+                while destination.exists():
+                    destination = base_dir / f"{Path(name).stem}_{collision}{Path(name).suffix}"
+                    collision += 1
+                destination.write_bytes(body)
+                saved.append(str(destination))
+            except Exception as exc:
+                logger.debug("Output node media download failed for %s: %s", source[:120], exc)
+        return saved
 
     def _download_preview_batch(self, base_dir, output, actions):
         """Download every original image held by a PreviewImage batch node."""
@@ -1979,9 +2045,9 @@ class BrowserRunner:
         try:
             with self._page.expect_download(timeout=30000) as dl:
                 result = self._comfy.evaluate(
-                    "(actions) => {"
-                    "var n=app.graph.getNodeById(" + node_id + ");"
-                    "if(!n)return 'node_not_found';"
+                    "({actions,nodeId,mediaType}) => {"
+                    "var n=app.graph.getNodeById(Number(nodeId));"
+                    "if(!n)return {state:'node_not_found',configuredNodeId:String(nodeId)};"
                     "var opts=app.canvas.getNodeMenuOptions ? app.canvas.getNodeMenuOptions(n) : null;"
                     "if(!opts)return 'no_options';"
                     "for(var i=0;i<opts.length;i++) {"
@@ -1994,9 +2060,9 @@ class BrowserRunner:
                     "    return {state:'no_callback',label:label};"
                     "  }"
                     "}"
-                    "return {state:'not_found',available:opts.filter(Boolean).map(function(o){return o.content||o.label||'';})};"
+                    "return {state:'not_found',nodeId:String(n.id),available:opts.filter(Boolean).map(function(o){return o.content||o.label||'';})};"
                     "}",
-                    actions,
+                    {"actions": actions, "nodeId": node_id, "mediaType": output.media_type},
                 )
                 logger.info("Output save result for node %s: %s", node_id, result)
 
@@ -2148,6 +2214,9 @@ class BrowserRunner:
             max_retries = 3
             attempt = 0
             status = None
+            # Exclude page loading, uploads and account queue time.
+            execution_started_at = None
+            execution_limit = min(max(1, int(timeout or 600)), 60 * 60)
 
             while attempt <= max_retries:
                 self._raise_if_cancelled()
@@ -2166,6 +2235,10 @@ class BrowserRunner:
                     if not self.select_plus_mode():
                         raise RuntimeError("未找到 Plus 模式运行按钮")
 
+                if execution_started_at is None:
+                    execution_started_at = time.monotonic()
+                    logger.info("Workflow execution timer started (limit=%ds)", execution_limit)
+
                 # Click a blank area to defocus / close any open popups
                 self._page.mouse.click(10, 450)
                 self._page.wait_for_timeout(1000)
@@ -2176,10 +2249,10 @@ class BrowserRunner:
                 # a freshly completed workflow.
                 min_run_seconds = self.workflow_spec.completion.minimum_run_seconds
                 poll_interval = 2
-                deadline = time.time() + timeout
-                while time.time() < deadline:
+                deadline = execution_started_at + execution_limit
+                while time.monotonic() < deadline:
                     self._raise_if_cancelled()
-                    elapsed = time.time() - (deadline - timeout)
+                    elapsed = time.monotonic() - execution_started_at
                     if int(elapsed) % 30 < poll_interval:
                         detail = (
                             f"工作流运行中（已等待 {int(elapsed)} 秒，"
@@ -2249,15 +2322,16 @@ class BrowserRunner:
                 if status == "done":
                     break  # exit retry loop
 
-                if time.time() >= deadline:
+                if time.monotonic() >= deadline:
                     logger.warning("Timeout on attempt %d/%d",
                                    attempt, max_retries + 1)
                     status = "timeout"
+                    break
 
             logger.info("Final status: %s (retries used: %d)", status, attempt - 1)
             if status != "done":
                 raise TimeoutError(
-                    f"任务运行超时（{timeout} 秒），"
+                    f"任务运行超时（{execution_limit} 秒），"
                     '未检测到带"显示报告/Show Report"的完成弹窗'
                 )
 

@@ -33,7 +33,7 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
     assert [item["node_id"] for item in by_key("firered_ecommerce_tryon")["spec"]["uploads"]] == ["207", "208"]
     assert by_key("firered_ecommerce_tryon")["inputs"][2]["input_type"] == "text"
     assert by_key("firered_ecommerce_tryon")["spec"]["texts"][0] == {
-        "key": "prompt", "node_id": "264", "widget": "prompt",
+        "key": "prompt", "node_id": "264", "widget": "编辑文本",
         "label": "换装要求", "required": True,
     }
     assert by_key("firered_ecommerce_tryon")["spec"]["outputs"][0]["node_id"] == "253"
@@ -53,6 +53,18 @@ def test_all_catalog_entries_have_runnable_server_configuration():
         assert item["post_id"].isdigit()
         assert item["inputs"]
         assert item["spec"]["outputs"]
+
+
+def test_frontend_workflow_descriptions():
+    assert by_key("firered_ecommerce_tryon")["description"] == (
+        "让图1的人物穿上图2人物身上的衣服，不要改变发型，头发保持长发"
+    )
+    assert by_key("scail_4k_pose_background")["description"] == (
+        "将图1中的角色移至图2中，并调整为与图2角色相似的姿势。"
+        "保持图1角色的外貌特征一致性，重新进行光线处理，使其与图2场景的光线和整体氛围自然融合，"
+        "确保无明显人工痕迹。"
+    )
+    assert by_key("auto_storyboard_short_video")["description"] == "12，包含一个手部特写"
 
 
 def test_catalog_post_mapping():

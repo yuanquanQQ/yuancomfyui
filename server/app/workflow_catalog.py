@@ -110,7 +110,7 @@ WORKFLOW_CATALOG = [
         [output(670, "video", "save video", "save preview")], timeout=7200, minimum_run_seconds=0,
     ),
     workflow(
-        "scail_4k_pose_background", "极境 4K 姿势迁移 · 背景替换", "将人物迁移到背景场景并增强姿势与画面一致性",
+        "scail_4k_pose_background", "极境 4K 姿势迁移 · 背景替换", "将图1中的角色移至图2中，并调整为与图2角色相似的姿势。保持图1角色的外貌特征一致性，重新进行光线处理，使其与图2场景的光线和整体氛围自然融合，确保无明显人工痕迹。",
         "image", "2088160851734913026", "person",
         [input_field("background", "背景图"), input_field("person", "人物图"),
          input_field("prompt", "迁移要求", "text", "text")],
@@ -134,7 +134,7 @@ WORKFLOW_CATALOG = [
         [output(448, "image", "save preview", "save image")], timeout=7200, minimum_run_seconds=30,
     ),
     workflow(
-        "auto_storyboard_short_video", "自动分镜 · 短视频", "根据参考图和分镜数量及特写要求生成差异化短视频分镜图",
+        "auto_storyboard_short_video", "自动分镜 · 短视频", "12，包含一个手部特写",
         "image", "2089754761372454913", "reference",
         [input_field("reference", "参考图"), input_field("request", "分镜数量与要求", "text", "text")],
         [upload("reference", 41, "参考图")],
@@ -143,13 +143,13 @@ WORKFLOW_CATALOG = [
         timeout=7200, minimum_run_seconds=30,
     ),
     workflow(
-        "firered_ecommerce_tryon", "极境电商换装 · FireRed", "根据人物图与服装参考图生成保持人物特征的电商换装效果",
+        "firered_ecommerce_tryon", "极境电商换装 · FireRed", "让图1的人物穿上图2人物身上的衣服，不要改变发型，头发保持长发",
         "image", "2089732224055861249", "person",
         [input_field("person", "人物图"), input_field("garment", "服装参考图"),
          input_field("prompt", "换装要求", "text", "text")],
         [upload("person", 207, "人物图"), upload("garment", 208, "服装参考图")],
         [output(253, "image", "save image", "save preview")],
-        texts=[{"key": "prompt", "node_id": "264", "widget": "prompt", "label": "换装要求", "required": True}],
+        texts=[{"key": "prompt", "node_id": "264", "widget": "编辑文本", "label": "换装要求", "required": True}],
         timeout=7200, minimum_run_seconds=30,
     ),
     workflow(
