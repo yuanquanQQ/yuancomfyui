@@ -1307,6 +1307,59 @@ class BrowserRunner:
                              scope_name, str(exc)[:120])
         return None
 
+    def _current_task_list_state(self):
+        """Return the status of the newest visible RunningHub task-list item.
+
+        The sidebar keeps older failed tasks visible while a new task is
+        running.  Looking for any ``任务失败`` text therefore produces false
+        failures.  Status labels are sorted by their screen position and only
+        the topmost (newest) visible item is considered.
+        """
+        if not self._page:
+            return None
+
+        script = r"""
+            () => {
+                const visible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && Number(style.opacity || 1) > 0
+                        && rect.width > 0 && rect.height > 0;
+                };
+                const matches = [];
+                for (const el of document.querySelectorAll('div, span, p')) {
+                    if (!visible(el)) continue;
+                    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                    let state = null;
+                    if (/^生成中(?:\s|\d|:)*$/.test(text)
+                            || /^生产中(?:\s|\d|:)*$/.test(text)) {
+                        state = 'running';
+                    } else if (text === '任务失败') {
+                        state = 'failed';
+                    }
+                    if (!state) continue;
+                    const rect = el.getBoundingClientRect();
+                    matches.push({state, text, top: rect.top, left: rect.left});
+                }
+                if (!matches.length) return null;
+                matches.sort((a, b) => a.top - b.top || a.left - b.left);
+                return matches[0];
+            }
+        """
+        try:
+            result = self._page.evaluate(script)
+            if result:
+                logger.debug(
+                    "Newest task-list state: %s (%s)",
+                    result.get("state"), result.get("text", ""),
+                )
+            return result
+        except Exception as exc:
+            logger.debug("Task-list state check failed: %s", str(exc)[:120])
+            return None
+
     def wait_for_completion(self, timeout=600, poll_interval=2):
         timeout_text = f"{timeout}s" if timeout and timeout > 0 else "unlimited"
         logger.info("Waiting for visible final report popup (timeout=%s)...",
@@ -2250,6 +2303,7 @@ class BrowserRunner:
                 min_run_seconds = self.workflow_spec.completion.minimum_run_seconds
                 poll_interval = 2
                 deadline = execution_started_at + execution_limit
+                consecutive_failure_polls = 0
                 while time.monotonic() < deadline:
                     self._raise_if_cancelled()
                     elapsed = time.monotonic() - execution_started_at
@@ -2275,6 +2329,19 @@ class BrowserRunner:
                             continue
                         status = "done"
                         break
+
+                    # Completion is authoritative and must always be checked
+                    # before the task list: RunningHub can show "任务失败" in
+                    # the sidebar even after a workflow has completed.
+                    task_list_state = self._current_task_list_state()
+                    if task_list_state and task_list_state.get("state") == "failed":
+                        consecutive_failure_polls += 1
+                        if consecutive_failure_polls >= 2:
+                            raise RuntimeError(
+                                "RunningHub 任务列表显示任务失败，已停止等待"
+                            )
+                    else:
+                        consecutive_failure_polls = 0
 
                     # Check for error popups
                     err = self._detect_error_popup()

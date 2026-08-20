@@ -81,6 +81,23 @@ class BrowserPostTests(unittest.TestCase):
             runner._candidate_workflow_urls(),
         )
 
+    def test_task_list_state_uses_newest_visible_status(self):
+        self.page.evaluate.return_value = {
+            "state": "running", "text": "生成中 00:08", "top": 120,
+        }
+
+        result = self.runner._current_task_list_state()
+
+        self.assertEqual("running", result["state"])
+        script = self.page.evaluate.call_args.args[0]
+        self.assertIn("matches.sort", script)
+        self.assertIn("任务失败", script)
+
+    def test_task_list_state_returns_none_when_sidebar_has_no_status(self):
+        self.page.evaluate.return_value = None
+
+        self.assertIsNone(self.runner._current_task_list_state())
+
 
 if __name__ == "__main__":
     unittest.main()
