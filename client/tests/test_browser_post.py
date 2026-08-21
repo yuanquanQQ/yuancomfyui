@@ -98,6 +98,17 @@ class BrowserPostTests(unittest.TestCase):
 
         self.assertIsNone(self.runner._current_task_list_state())
 
+    def test_task_list_state_recognizes_runninghub_queue(self):
+        self.page.evaluate.return_value = {
+            "state": "queued", "text": "排队中（第164位）", "top": 120,
+        }
+
+        result = self.runner._current_task_list_state()
+
+        self.assertEqual("queued", result["state"])
+        script = self.page.evaluate.call_args.args[0]
+        self.assertIn("排队中", script)
+
     def test_failed_task_waits_for_completion_grace_period(self):
         first_seen, confirmed = self.runner._observe_task_failure(
             {"state": "failed"}, None, 100,
@@ -118,6 +129,13 @@ class BrowserPostTests(unittest.TestCase):
     def test_running_task_cancels_failure_observation(self):
         first_seen, confirmed = self.runner._observe_task_failure(
             {"state": "running"}, 100, 120,
+        )
+        self.assertIsNone(first_seen)
+        self.assertFalse(confirmed)
+
+    def test_queued_task_cancels_failure_observation(self):
+        first_seen, confirmed = self.runner._observe_task_failure(
+            {"state": "queued"}, 100, 120,
         )
         self.assertIsNone(first_seen)
         self.assertFalse(confirmed)

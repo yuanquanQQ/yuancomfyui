@@ -1338,6 +1338,8 @@ class BrowserRunner:
                     if (/^生成中(?:\s|\d|:)*$/.test(text)
                             || /^生产中(?:\s|\d|:)*$/.test(text)) {
                         state = 'running';
+                    } else if (/^排队中(?:\s|（|\(|第|\d|位|）|\))*$/.test(text)) {
+                        state = 'queued';
                     } else if (text === '任务失败') {
                         state = 'failed';
                     }
@@ -1372,7 +1374,7 @@ class BrowserRunner:
         missing state keeps it alive because the sidebar may be refreshing.
         """
         state = (task_list_state or {}).get("state")
-        if state == "running":
+        if state in ("running", "queued"):
             return None, False
         if state != "failed":
             return first_seen_at, False
@@ -2394,7 +2396,9 @@ class BrowserRunner:
                 poll_interval = 2
                 deadline = execution_started_at + execution_limit
                 failure_first_seen_at = None
-                while time.monotonic() < deadline:
+                queue_last_seen_at = None
+                last_task_state = None
+                while time.monotonic() < deadline or last_task_state == "queued":
                     self._raise_if_cancelled()
                     elapsed = time.monotonic() - execution_started_at
                     if int(elapsed) % 30 < poll_interval:
@@ -2424,6 +2428,23 @@ class BrowserRunner:
                     # before the task list: RunningHub can show "任务失败" in
                     # the sidebar even after a workflow has completed.
                     task_list_state = self._current_task_list_state()
+                    task_state = (task_list_state or {}).get("state")
+                    last_task_state = task_state
+                    now_monotonic = time.monotonic()
+                    if task_state == "queued":
+                        # RunningHub's own capacity queue is not workflow
+                        # execution time. Extend the deadline for every period
+                        # continuously observed in this state.
+                        if queue_last_seen_at is not None:
+                            deadline += max(0, now_monotonic - queue_last_seen_at)
+                        queue_last_seen_at = now_monotonic
+                        queue_text = task_list_state.get("text") or "排队中"
+                        self._report_progress(
+                            "running_workflow",
+                            f"RunningHub {queue_text}，正在正常等待可用资源",
+                        )
+                    else:
+                        queue_last_seen_at = None
                     previous_failure_seen_at = failure_first_seen_at
                     failure_first_seen_at, failure_confirmed = (
                         self._observe_task_failure(
