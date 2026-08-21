@@ -98,6 +98,30 @@ class BrowserPostTests(unittest.TestCase):
 
         self.assertIsNone(self.runner._current_task_list_state())
 
+    def test_failed_task_waits_for_completion_grace_period(self):
+        first_seen, confirmed = self.runner._observe_task_failure(
+            {"state": "failed"}, None, 100,
+        )
+        self.assertEqual(100, first_seen)
+        self.assertFalse(confirmed)
+
+        first_seen, confirmed = self.runner._observe_task_failure(
+            {"state": "failed"}, first_seen, 159,
+        )
+        self.assertFalse(confirmed)
+
+        first_seen, confirmed = self.runner._observe_task_failure(
+            {"state": "failed"}, first_seen, 160,
+        )
+        self.assertTrue(confirmed)
+
+    def test_running_task_cancels_failure_observation(self):
+        first_seen, confirmed = self.runner._observe_task_failure(
+            {"state": "running"}, 100, 120,
+        )
+        self.assertIsNone(first_seen)
+        self.assertFalse(confirmed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -103,6 +103,8 @@ def _launch_browser(playwright, launch_options):
 class BrowserRunner:
     """Playwright-based browser automation for RunningHub workflow."""
 
+    TASK_FAILURE_GRACE_SECONDS = 60
+
     def __init__(self, *, headless=True, slow_mo=300, user_data_dir=None,
                  workflow_url=None, workflow_id=None, post_id=None,
                  workflow_spec: Optional[WorkflowSpec] = None,
@@ -1360,6 +1362,24 @@ class BrowserRunner:
             logger.debug("Task-list state check failed: %s", str(exc)[:120])
             return None
 
+    @staticmethod
+    def _observe_task_failure(task_list_state, first_seen_at, now,
+                              grace_seconds=TASK_FAILURE_GRACE_SECONDS):
+        """Track a failed sidebar state without racing the completion popup.
+
+        RunningHub can render ``任务失败`` before its authoritative completion
+        popup appears.  A visible running state cancels the observation; a
+        missing state keeps it alive because the sidebar may be refreshing.
+        """
+        state = (task_list_state or {}).get("state")
+        if state == "running":
+            return None, False
+        if state != "failed":
+            return first_seen_at, False
+        if first_seen_at is None:
+            return now, False
+        return first_seen_at, now - first_seen_at >= grace_seconds
+
     def wait_for_completion(self, timeout=600, poll_interval=2):
         timeout_text = f"{timeout}s" if timeout and timeout > 0 else "unlimited"
         logger.info("Waiting for visible final report popup (timeout=%s)...",
@@ -1747,6 +1767,14 @@ class BrowserRunner:
         # Strategy 1 (PRIMARY): invoke each configured output-node save action.
         for output in self.workflow_spec.outputs:
             try:
+                # SaveImage batches expose every result in node metadata. Use
+                # those URLs before the context menu, which may download only
+                # the currently selected preview image.
+                if output.media_type == "image":
+                    media_saved = self._download_output_node_media(base_dir, output)
+                    if media_saved:
+                        saved.extend(media_saved)
+                        continue
                 result = self._download_via_context_menu(base_dir, output)
                 if result:
                     saved.extend(result)
@@ -1917,11 +1945,21 @@ class BrowserRunner:
                 const node = app.graph.getNodeById(Number(nodeId));
                 if (!node) return [];
                 const urls = [];
-                for (const image of (Array.isArray(node.imgs) ? node.imgs : [])) {
+                const outputData = (app.nodeOutputs && app.nodeOutputs[node.id])
+                    || (app.nodeOutputs && app.nodeOutputs[String(node.id)]) || {};
+                const loadedImages = [
+                    ...(Array.isArray(node.imgs) ? node.imgs : []),
+                    ...(Array.isArray(outputData.imgs) ? outputData.imgs : []),
+                ];
+                for (const image of loadedImages) {
                     const src = image && (image.currentSrc || image.src);
                     if (src) urls.push(src);
                 }
-                for (const item of (Array.isArray(node.images) ? node.images : [])) {
+                const imageMetadata = [
+                    ...(Array.isArray(node.images) ? node.images : []),
+                    ...(Array.isArray(outputData.images) ? outputData.images : []),
+                ];
+                for (const item of imageMetadata) {
                     if (!item || !item.filename) continue;
                     const url = new URL('/view', location.origin);
                     url.searchParams.set('filename', item.filename);
@@ -1942,7 +1980,15 @@ class BrowserRunner:
                 body = response.body()
                 content_type = (response.headers.get("content-type") or "").lower()
                 expected = "image" if output.media_type == "image" else "video"
-                if not response.ok or expected not in content_type or len(body) < 10000:
+                image_signature = (
+                    body.startswith(b"\x89PNG\r\n\x1a\n")
+                    or body.startswith(b"\xff\xd8\xff")
+                    or (body.startswith(b"RIFF") and body[8:12] == b"WEBP")
+                )
+                valid_type = expected in content_type
+                if output.media_type == "image":
+                    valid_type = valid_type or image_signature
+                if not response.ok or not valid_type or len(body) < 10000:
                     continue
                 suffix = ".png" if output.media_type == "image" else ".mp4"
                 parsed = urllib.parse.urlparse(source)
@@ -1962,15 +2008,34 @@ class BrowserRunner:
         return saved
 
     def _download_preview_batch(self, base_dir, output, actions):
-        """Download every original image held by a PreviewImage batch node."""
+        """Download every image displayed by one image output node.
+
+        RunningHub's SaveImage node sometimes renders a thumbnail grid without
+        exposing the corresponding URLs through ``node.imgs``/``node.images``.
+        Its image-specific save action is supplied by ``getExtraMenuOptions``
+        (the menu users see after right-clicking a thumbnail), rather than by
+        the ordinary node context menu.  Select each image in turn, invoke that
+        image menu action, then clear the selection just like closing the
+        expanded preview with its ``x`` button.
+        """
         node_id = output.node_id
+        # imageRects is populated by SaveImage's canvas draw routine. A node
+        # outside the viewport has no grid geometry yet, so render it first.
+        self._center_node_on_canvas(node_id)
         raw_count = self._comfy.evaluate(
             """(nodeId) => {
                 const node = app.graph.getNodeById(Number(nodeId));
                 if (!node) return 0;
-                const loaded = Array.isArray(node.imgs) ? node.imgs.length : 0;
-                const metadata = Array.isArray(node.images) ? node.images.length : 0;
-                return Math.max(loaded, metadata, 1);
+                const outputData = (app.nodeOutputs && app.nodeOutputs[node.id])
+                    || (app.nodeOutputs && app.nodeOutputs[String(node.id)]) || {};
+                const counts = [
+                    Array.isArray(node.imgs) ? node.imgs.length : 0,
+                    Array.isArray(node.images) ? node.images.length : 0,
+                    Array.isArray(node.imageRects) ? node.imageRects.length : 0,
+                    Array.isArray(outputData.imgs) ? outputData.imgs.length : 0,
+                    Array.isArray(outputData.images) ? outputData.images.length : 0,
+                ];
+                return Math.max(...counts, 1);
             }""",
             node_id,
         )
@@ -2004,9 +2069,22 @@ class BrowserRunner:
                                 if (node.setDirtyCanvas) {
                                     node.setDirtyCanvas(true, true);
                                 }
-                                const options = app.canvas.getNodeMenuOptions
-                                    ? app.canvas.getNodeMenuOptions(node) : null;
-                                if (!options) return {state: 'no_options'};
+                                // SaveImage/PreviewImage adds "Save Image" only
+                                // to its image-sensitive (right-click) menu.
+                                const imageOptions = [];
+                                if (typeof node.getExtraMenuOptions === 'function') {
+                                    try {
+                                        node.getExtraMenuOptions(app.canvas, imageOptions);
+                                    } catch (error) {
+                                        try {
+                                            node.getExtraMenuOptions(null, imageOptions);
+                                        } catch (_) {}
+                                    }
+                                }
+                                const nodeOptions = app.canvas.getNodeMenuOptions
+                                    ? (app.canvas.getNodeMenuOptions(node) || []) : [];
+                                const options = [...imageOptions, ...nodeOptions];
+                                if (!options.length) return {state: 'no_options'};
                                 for (const option of options) {
                                     if (!option) continue;
                                     const label = option.content || option.label || '';
@@ -2054,6 +2132,18 @@ class BrowserRunner:
                         collision += 1
                     download.save_as(str(destination))
                     saved.append(str(destination))
+                    # Clear the enlarged/selected image before selecting the
+                    # next thumbnail. This is equivalent to clicking its x.
+                    self._comfy.evaluate(
+                        """(nodeId) => {
+                            const node = app.graph.getNodeById(Number(nodeId));
+                            if (!node) return;
+                            node.imageIndex = null;
+                            node.overIndex = null;
+                            if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
+                        }""",
+                        node_id,
+                    )
                     logger.info(
                         "Saved preview image %d/%d: %s (%d bytes)",
                         image_index + 1, image_count, destination,
@@ -2303,7 +2393,7 @@ class BrowserRunner:
                 min_run_seconds = self.workflow_spec.completion.minimum_run_seconds
                 poll_interval = 2
                 deadline = execution_started_at + execution_limit
-                consecutive_failure_polls = 0
+                failure_first_seen_at = None
                 while time.monotonic() < deadline:
                     self._raise_if_cancelled()
                     elapsed = time.monotonic() - execution_started_at
@@ -2334,14 +2424,29 @@ class BrowserRunner:
                     # before the task list: RunningHub can show "任务失败" in
                     # the sidebar even after a workflow has completed.
                     task_list_state = self._current_task_list_state()
-                    if task_list_state and task_list_state.get("state") == "failed":
-                        consecutive_failure_polls += 1
-                        if consecutive_failure_polls >= 2:
-                            raise RuntimeError(
-                                "RunningHub 任务列表显示任务失败，已停止等待"
-                            )
-                    else:
-                        consecutive_failure_polls = 0
+                    previous_failure_seen_at = failure_first_seen_at
+                    failure_first_seen_at, failure_confirmed = (
+                        self._observe_task_failure(
+                            task_list_state,
+                            failure_first_seen_at,
+                            time.monotonic(),
+                        )
+                    )
+                    if (failure_first_seen_at is not None
+                            and previous_failure_seen_at is None):
+                        logger.warning(
+                            "Task list shows failure; waiting %ds for an "
+                            "authoritative completion popup",
+                            self.TASK_FAILURE_GRACE_SECONDS,
+                        )
+                        self._report_progress(
+                            "running_workflow",
+                            "检测到任务状态异常，正在确认工作流是否已经完成",
+                        )
+                    if failure_confirmed:
+                        raise RuntimeError(
+                            "RunningHub 任务列表持续显示任务失败，且未检测到工作流完成"
+                        )
 
                     # Check for error popups
                     err = self._detect_error_popup()

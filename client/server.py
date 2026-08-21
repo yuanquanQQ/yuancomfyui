@@ -123,7 +123,7 @@ for _dir in (DATA / "pic", DATA / "ple", DATA / "video", UPLOADS, PROFILES,
 
 LICENSE = LicenseManager(
     APP_ROOT / ".license",
-    os.environ.get("LICENSE_SERVER_URL", "https://drxbpb65n5.coze.site"),
+    os.environ.get("LICENSE_SERVER_URL", "http://124.223.224.38"),
 )
 
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="runner")
@@ -1101,8 +1101,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/workflows":
             try:
                 return self._json(_public_workflows())
-            except (LicenseError, ConnectionError):
-                return self._json([])
+            except (LicenseError, ConnectionError) as exc:
+                logger.error("Workflow catalog unavailable: %s", exc)
+                return self._json({"error": str(exc)}, 503)
         if path == "/api/license/status":
             return self._json(LICENSE.status(check_online=True))
         if path == "/api/accounts":
