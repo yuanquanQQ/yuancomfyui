@@ -66,16 +66,12 @@ async function login(event) {
   }
   setBusy(button, true);
   try {
-    const serverUrl = $('#server-url').value.trim();
-    error.textContent = '正在连接服务器...';
-    await bridge('set_server', serverUrl);
     error.textContent = '正在验证管理员账号...';
     await bridge('login', $('#username').value.trim(), $('#password').value);
     error.textContent = '正在加载管理数据...';
     await loadDashboard();
     $('#password').value = '';
     error.textContent = '';
-    $('#server-label').textContent = serverUrl;
     $('#login-view').classList.add('hidden');
     $('#app-view').classList.remove('hidden');
   } catch (exception) {
@@ -288,7 +284,7 @@ function bindEvents() {
 
 function bridgeMethodsReady() {
   const api = window.pywebview?.api;
-  return Boolean(api) && ['get_config', 'set_server', 'login', 'stats']
+  return Boolean(api) && ['login', 'stats']
     .every(method => typeof api[method] === 'function');
 }
 
@@ -300,11 +296,7 @@ async function initializeBridge() {
   const loginButton = $('#login-button');
   loginButton.disabled = false;
   loginButton.textContent = '登录';
-  try {
-    const config = await bridge('get_config');
-    $('#server-url').value = config.server_url || '';
-  } catch (exception) { toast(exception.message, true); }
-  finally { state.bridgeInitializing = false; }
+  state.bridgeInitializing = false;
   return true;
 }
 

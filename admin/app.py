@@ -8,7 +8,7 @@ from api_client import ApiError, LicenseApiClient
 
 
 APP_DIR = Path(__file__).resolve().parent
-SERVER_URL = "https://drxbpb65n5.coze.site"
+SERVER_URL = "http://124.223.224.38"
 
 
 class AdminBridge:
@@ -26,17 +26,6 @@ class AdminBridge:
     @staticmethod
     def _error(exc):
         return {"ok": False, "error": str(exc)}
-
-    def get_config(self):
-        return self._ok({"server_url": SERVER_URL})
-
-    def set_server(self, server_url):
-        try:
-            self._client.configure(SERVER_URL)
-            health = self._client.health()
-            return self._ok(health)
-        except ApiError as exc:
-            return self._error(exc)
 
     def login(self, username, password):
         try:
