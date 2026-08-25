@@ -2,6 +2,7 @@
 """Local RunningHub multi-account task console."""
 
 import http.server
+import hashlib
 from email.parser import BytesParser
 from email.policy import default as email_policy
 import ipaddress
@@ -11,6 +12,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -43,7 +45,10 @@ if getattr(sys, "frozen", False):
     if configured_data_root:
         APP_ROOT = Path(configured_data_root).expanduser().resolve()
     else:
-        APP_ROOT = INSTALL_ROOT
+        # Keep mutable files separate from the executable. Inno Setup removes
+        # only the program on uninstall, so this directory survives a normal
+        # uninstall/reinstall on the selected drive.
+        APP_ROOT = INSTALL_ROOT / "UserData"
 else:
     BUNDLE_ROOT = Path(__file__).resolve().parent
     INSTALL_ROOT = BUNDLE_ROOT
@@ -51,11 +56,18 @@ else:
 
 
 def _migrate_legacy_install_data(legacy_root: Path, target_root: Path) -> None:
-    """Copy legacy install-local state once, without overwriting newer data."""
+    """Copy one previous data root once, without overwriting newer data."""
     try:
         if legacy_root.resolve() == target_root.resolve():
             return
-        marker = target_root / ".legacy_install_data_migrated"
+        if not legacy_root.is_dir():
+            # Do not mark an unavailable old drive as migrated. Its registry
+            # entry is retained and migration can resume if the drive returns.
+            return
+        source_key = hashlib.sha256(
+            str(legacy_root.resolve()).casefold().encode("utf-8")
+        ).hexdigest()[:16]
+        marker = target_root / f".migrated-{source_key}"
         if marker.exists():
             return
         target_root.mkdir(parents=True, exist_ok=True)
@@ -75,9 +87,96 @@ def _migrate_legacy_install_data(legacy_root: Path, target_root: Path) -> None:
         logger.warning("Legacy client data migration failed: %s", exc)
 
 
+def _known_data_roots() -> list[Path]:
+    """Read prior data locations; these registry values survive uninstall."""
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\YunComfyUI\Client") as key:
+            values = []
+            try:
+                value, _ = winreg.QueryValueEx(key, "DataRoot")
+                if value:
+                    values.append(value)
+            except OSError:
+                pass
+            try:
+                history, _ = winreg.QueryValueEx(key, "DataRoots")
+                values.extend(history if isinstance(history, list) else [])
+            except OSError:
+                pass
+        roots = []
+        for value in values:
+            root = Path(str(value)).expanduser().resolve()
+            if root not in roots:
+                roots.append(root)
+        return roots
+    except (OSError, ValueError):
+        return []
+
+
+def _remember_data_root(data_root: Path) -> None:
+    """Remember data independently of the installer's uninstall registry."""
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+        current = str(data_root.resolve())
+        history = [current] + [str(root) for root in _known_data_roots()]
+        history = list(dict.fromkeys(history))[:10]
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\YunComfyUI\Client") as key:
+            winreg.SetValueEx(key, "DataRoot", 0, winreg.REG_SZ, current)
+            winreg.SetValueEx(key, "DataRoots", 0, winreg.REG_MULTI_SZ, history)
+    except OSError as exc:
+        logger.warning("Unable to remember client data location: %s", exc)
+
+
+def _legacy_default_data_roots() -> list[Path]:
+    """Return known install roots used before the persistent UserData layout."""
+    if os.name != "nt":
+        return []
+    local_app_data = Path(
+        os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+    )
+    candidates = [
+        local_app_data / "Programs" / "YunComfyUI" / "Client",
+        local_app_data / "YunComfyUI" / "Client",
+    ]
+    for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+        if os.environ.get(variable):
+            candidates.append(Path(os.environ[variable]) / "YunComfyUI" / "Client")
+    # A user may have chosen another drive while retaining Inno Setup's
+    # default directory shape. Checking these exact paths is fast and bounded.
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        drive = Path(f"{letter}:\\")
+        if not drive.is_dir():
+            continue
+        candidates.extend([
+            drive / "Program Files" / "YunComfyUI" / "Client",
+            drive / "Program Files (x86)" / "YunComfyUI" / "Client",
+            drive / "YunComfyUI" / "Client",
+        ])
+    return list(dict.fromkeys(path.resolve() for path in candidates))
+
+
 if getattr(sys, "frozen", False):
-    _legacy_base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "YunComfyUI" / "Client"
-    _migrate_legacy_install_data(_legacy_base, APP_ROOT)
+    _legacy_local = (
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        / "YunComfyUI" / "Client"
+    )
+    # Sources cover: the immediately previous build (data beside the EXE), a
+    # reinstall on another drive/path, and the oldest LocalAppData builds.
+    _migration_sources = [
+        INSTALL_ROOT,
+        *_known_data_roots(),
+        *_legacy_default_data_roots(),
+        _legacy_local,
+    ]
+    for _previous_root in dict.fromkeys(_migration_sources):
+        if _previous_root:
+            _migrate_legacy_install_data(_previous_root, APP_ROOT)
+    _remember_data_root(APP_ROOT)
 
 try:
     from dotenv import load_dotenv
@@ -92,11 +191,12 @@ DATA = APP_ROOT / "data"
 UPLOADS = APP_ROOT / "uploads"
 PROFILES = APP_ROOT / "profiles"
 STATIC = BUNDLE_ROOT / "static"
-PORT = 8080
+DEFAULT_PORT = 8080
+PORT_SCAN_ATTEMPTS = 100
 MAX_WORKERS = 10
 LOGIN_WORKERS = 2
 QUEUE_TIMEOUT_SECONDS = int(os.environ.get("QUEUE_TIMEOUT_SECONDS", "86400"))
-MAX_TASK_REQUEUES = int(os.environ.get("MAX_TASK_REQUEUES", "2"))
+MAX_TASK_REQUEUES = int(os.environ.get("MAX_TASK_REQUEUES", "3"))
 
 
 def _browser_headless() -> bool:
@@ -104,6 +204,85 @@ def _browser_headless() -> bool:
     default = "1" if getattr(sys, "frozen", False) else "0"
     value = os.environ.get("YUNCOMFYUI_HEADLESS", default).strip().lower()
     return value not in {"0", "false", "no", "off", "headed"}
+
+
+def _configured_port() -> int:
+    """Return the preferred local port, allowing an environment override."""
+    raw = os.environ.get("YUNCOMFYUI_PORT", str(DEFAULT_PORT)).strip()
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"YUNCOMFYUI_PORT 不是有效端口: {raw!r}") from exc
+    if not 0 <= port <= 65535:
+        raise ValueError(f"YUNCOMFYUI_PORT 超出有效范围: {port}")
+    return port
+
+
+class LocalThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """A local server that cannot share its listening port on Windows."""
+
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(
+                socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1
+            )
+        super().server_bind()
+
+
+def _create_http_server(preferred_port: int, *, server_class=None):
+    """Bind the preferred port or the first available following port.
+
+    Port 0 is preserved as an explicit request for an operating-system chosen
+    ephemeral port.  Otherwise a bounded consecutive range is scanned by
+    binding directly, which avoids a check-then-bind race.
+    """
+    server_class = server_class or LocalThreadingHTTPServer
+    if preferred_port == 0:
+        server = server_class(("127.0.0.1", 0), Handler)
+        return server, int(server.server_address[1])
+
+    last_error = None
+    final_port = min(65535, preferred_port + PORT_SCAN_ATTEMPTS - 1)
+    for candidate in range(preferred_port, final_port + 1):
+        try:
+            server = server_class(("127.0.0.1", candidate), Handler)
+            if candidate != preferred_port:
+                logger.warning(
+                    "Preferred port %d is unavailable; using %d instead",
+                    preferred_port, candidate,
+                )
+            return server, int(server.server_address[1])
+        except OSError as exc:
+            last_error = exc
+
+    raise OSError(
+        f"本机端口 {preferred_port}-{final_port} 均不可用"
+    ) from last_error
+
+
+def _write_server_state(actual_port: int) -> Path:
+    """Publish the selected port for local launch/restart helpers."""
+    runtime_dir = APP_ROOT / ".runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    state_path = runtime_dir / "server.json"
+    temp_path = runtime_dir / f".server.{os.getpid()}.{time.time_ns()}.tmp"
+    temp_path.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "port": actual_port,
+                "url": f"http://127.0.0.1:{actual_port}",
+                "started_at": time.time(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, state_path)
+    return state_path
 
 DEFAULT_WORKFLOW_KEY = ""
 DEFAULT_WORKFLOW_NAME = "工作流"
@@ -116,10 +295,68 @@ _workflow_catalog_loaded_at = 0.0
 LIBRARY = APP_ROOT / "library"
 WORKS = APP_ROOT / "works"
 LIBRARY_META = LIBRARY / ".metadata.json"
-for _dir in (DATA / "pic", DATA / "ple", DATA / "video", UPLOADS, PROFILES,
-             APP_ROOT / "outputs", LIBRARY / "images", LIBRARY / "videos",
-             LIBRARY / "audio", LIBRARY / "texts", WORKS):
-    _dir.mkdir(parents=True, exist_ok=True)
+
+
+def _quarantine_damaged_path(path: Path) -> Path:
+    """Move an unusable runtime path aside so a clean one can be rebuilt."""
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate = path.with_name(f"{path.name}.damaged-{timestamp}")
+    counter = 2
+    while candidate.exists():
+        candidate = path.with_name(
+            f"{path.name}.damaged-{timestamp}-{counter}"
+        )
+        counter += 1
+    path.replace(candidate)
+    logger.warning("Quarantined damaged runtime path: %s -> %s", path, candidate)
+    return candidate
+
+
+def _ensure_runtime_layout(app_root: Path | None = None) -> dict[str, Path]:
+    """Recreate disposable runtime structure deleted/damaged by the user."""
+    root = Path(app_root or APP_ROOT)
+    library = root / "library"
+    required_dirs = (
+        root,
+        root / "data",
+        library,
+        root / ".license",
+        root / ".runtime",
+        root / "data" / "pic",
+        root / "data" / "ple",
+        root / "data" / "video",
+        root / "uploads",
+        root / "profiles",
+        root / "outputs",
+        library / "images",
+        library / "videos",
+        library / "audio",
+        library / "texts",
+        root / "works",
+    )
+    for directory in required_dirs:
+        if directory.exists() and not directory.is_dir():
+            _quarantine_damaged_path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+    metadata = library / ".metadata.json"
+    valid_metadata = False
+    if metadata.is_file():
+        try:
+            valid_metadata = isinstance(
+                json.loads(metadata.read_text(encoding="utf-8")), dict
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+    if metadata.exists() and not valid_metadata:
+        _quarantine_damaged_path(metadata)
+    if not valid_metadata:
+        metadata.write_text("{}\n", encoding="utf-8")
+        logger.info("Rebuilt missing/damaged library metadata: %s", metadata)
+    return {"root": root, "library_metadata": metadata}
+
+
+_ensure_runtime_layout()
 
 LICENSE = LicenseManager(
     APP_ROOT / ".license",
@@ -714,6 +951,11 @@ def _update_task_progress(task_id: str, stage: str, detail: str):
     with _tasks_lock:
         task = _tasks.get(task_id)
         if task and task.get("status") == "running":
+            retry_count = int(task.get("retry_count") or 0)
+            if retry_count:
+                detail = (
+                    f"自动重试 {retry_count}/{MAX_TASK_REQUEUES} · {detail}"
+                )
             task["stage"] = stage
             task["stage_detail"] = detail
             task["heartbeat_at"] = time.time()
@@ -763,82 +1005,104 @@ def _run_task(task_id: str, account: str) -> dict:
         return {"status": "failed", "error": str(exc)}
 
 
+def _automatic_retry_reason(error_text: str) -> str | None:
+    """Return a user-facing retry reason for every failure except cancel."""
+    text = str(error_text or "")
+    folded = text.casefold()
+    if ("任务已取消" in text or "用户取消" in text
+            or "task was cancelled" in folded
+            or "task was canceled" in folded):
+        return None
+    if ("超时" in text or "timeout" in folded):
+        return "任务超时"
+    if any(phrase in folded for phrase in (
+            "target page, context or browser has been closed",
+            "target closed",
+            "browser has been closed",
+            "target page has been closed")):
+        return "浏览器异常关闭"
+    return "任务失败"
+
+
 def _finish_task(task_id: str, account: str, future: Future):
     try:
         result = future.result()
     except Exception as exc:
         result = {"status": "failed", "error": str(exc)}
+    retry_scheduled = False
+    retry_reason = None
     with _tasks_lock:
         task = _tasks.get(task_id)
         if task:
-            task["status"] = result.get("status", "failed")
-            if task["status"] == "done":
-                task["stage"], task["stage_detail"] = "completed", "任务已完成"
-            elif task["status"] == "cancelled":
-                task["stage"], task["stage_detail"] = "cancelled", "任务已取消"
+            result_status = result.get("status", "failed")
+            error_text = str(result.get("error") or "")
+            retry_reason = (
+                _automatic_retry_reason(error_text)
+                if result_status == "failed" else None
+            )
+            retry_count = int(task.get("retry_count") or 0)
+            if retry_reason and retry_count < MAX_TASK_REQUEUES:
+                attempt_errors = list(task.get("attempt_errors") or ())
+                attempt_errors.append(error_text)
+                retry_count += 1
+                now = time.time()
+                task.update({
+                    "status": "queued",
+                    "stage": "queued",
+                    "stage_detail": (
+                        f"{retry_reason}，自动重试 "
+                        f"{retry_count}/{MAX_TASK_REQUEUES}，等待执行"
+                    ),
+                    "retry_count": retry_count,
+                    "original_task_id": (
+                        task.get("original_task_id") or task_id
+                    ),
+                    "attempt_errors": attempt_errors,
+                    "account": None,
+                    "phone": None,
+                    "started_at": None,
+                    "completed_at": None,
+                    "heartbeat_at": now,
+                    "files": [],
+                    "error": None,
+                })
+                if task_id not in _task_queue:
+                    _task_queue.append(task_id)
+                retry_scheduled = True
             else:
-                task["stage"], task["stage_detail"] = "failed", "任务失败"
-            task["heartbeat_at"] = time.time()
-            task["completed_at"] = time.time()
-            task["files"] = result.get("files", [])
-            task["error"] = result.get("error")
+                task["status"] = result_status
+                if result_status == "done":
+                    task["stage"], task["stage_detail"] = (
+                        "completed", "任务已完成"
+                    )
+                elif result_status == "cancelled":
+                    task["stage"], task["stage_detail"] = (
+                        "cancelled", "任务已取消"
+                    )
+                else:
+                    task["stage"], task["stage_detail"] = (
+                        "failed", "重试 3 次后仍然失败"
+                    )
+                task["heartbeat_at"] = time.time()
+                task["completed_at"] = time.time()
+                task["files"] = result.get("files", [])
+                task["error"] = result.get("error")
             # Release any pending screenshot waiters before removing runner reference
             runner = task.pop("runner", None)
             if runner and runner.screenshot_requested.is_set():
                 runner.screenshot_error = "Task has completed"
                 runner.screenshot_ready.set()
         _account_busy.discard(account)
-    logger.info("[%s] %s; account %s is free", task_id, result.get("status"), account)
-
-    # Auto re-queue if the task timed out and still has retries left
-    if task and result.get("status") == "failed":
-        error_text = result.get("error", "")
-        is_timeout = "超时" in error_text or "Timeout" in error_text or "timeout" in error_text
-        is_browser_crash = any(phrase in error_text for phrase in (
-            "Target page, context or browser has been closed",
-            "Target closed",
-            "Browser has been closed",
-            "Target page has been closed",
-            "browser has been closed",
-        ))
-        if is_timeout or is_browser_crash:
-            requeue_count = task.get("retry_count", 0)
-            if requeue_count < MAX_TASK_REQUEUES:
-                now = time.time()
-                new_task_id = f"task_{int(now * 1000)}_{uuid.uuid4().hex[:6]}"
-                new_task = {
-                    **{k: v for k, v in task.items()
-                       if k in ("workflow_key", "workflow_name", "task_name",
-                                "input_files", "input_paths", "video", "model",
-                                "clothing", "video_path", "model_path",
-                                "clothing_path", "requested_account")},
-                    "task_id": new_task_id,
-                    "status": "queued",
-                    "stage": "queued",
-                    "stage_detail": (
-                        f"浏览器崩溃自动重新排队（{requeue_count + 1}/{MAX_TASK_REQUEUES}）"
-                        if is_browser_crash
-                        else f"超时自动重新排队（{requeue_count + 1}/{MAX_TASK_REQUEUES}）"
-                    ),
-                    "retry_count": requeue_count + 1,
-                    "original_task_id": task.get("original_task_id") or task_id,
-                    "account": None,
-                    "phone": None,
-                    "created_at": now,
-                    "started_at": None,
-                    "completed_at": None,
-                    "heartbeat_at": now,
-                    "files": [],
-                    "error": None,
-                }
-                _tasks[new_task_id] = new_task
-                _task_queue.append(new_task_id)
-                logger.info(
-                    "[%s] %s — re-queued as %s (attempt %d/%d)",
-                    task_id,
-                    "Browser crashed" if is_browser_crash else "Timed out",
-                    new_task_id, requeue_count + 1, MAX_TASK_REQUEUES,
-                )
+    if retry_scheduled:
+        logger.info(
+            "[%s] %s — retrying in the same task row (%d/%d)",
+            task_id, retry_reason, task.get("retry_count"), MAX_TASK_REQUEUES,
+        )
+    else:
+        logger.info(
+            "[%s] %s; account %s is free",
+            task_id, result.get("status"), account,
+        )
 
     _dispatch_tasks()
 
@@ -947,6 +1211,46 @@ def _task_list():
     with _tasks_lock:
         return [_public_task(t) for t in sorted(
             _tasks.values(), key=lambda item: item["created_at"], reverse=True)]
+
+
+def _restart_task_in_place(task_id: str) -> dict:
+    """Manually restart a terminal task without creating another table row."""
+    with _tasks_lock:
+        old_task = _tasks.get(task_id)
+        if not old_task:
+            raise ValueError("任务不存在")
+        if old_task.get("status") in ("queued", "running"):
+            raise ValueError("任务仍在排队或运行中")
+        input_paths = dict(old_task.get("input_paths") or {})
+        requested = old_task.get("requested_account", "auto")
+        workflow_key = old_task.get("workflow_key")
+        manual_restart_count = int(old_task.get("manual_restart_count") or 0)
+
+    if not input_paths:
+        raise ValueError("原任务缺少素材路径，无法重新提交")
+    workflow = _workflow_config(workflow_key)
+    now = time.time()
+    restarted = _new_task(workflow, input_paths, requested, now)
+    restarted.update({
+        "task_id": task_id,
+        "manual_restart_count": manual_restart_count + 1,
+        "stage_detail": "手动重新运行，等待可用账号",
+    })
+
+    with _tasks_lock:
+        current = _tasks.get(task_id)
+        if not current:
+            raise ValueError("任务不存在")
+        if current.get("status") in ("queued", "running"):
+            raise ValueError("任务仍在排队或运行中")
+        current.clear()
+        current.update(restarted)
+        if task_id not in _task_queue:
+            _task_queue.append(task_id)
+
+    _dispatch_tasks()
+    with _tasks_lock:
+        return _public_task(_tasks[task_id])
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1544,30 +1848,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(response)
 
         if path == "/api/restart":
-            old_task_id = str(data.get("task_id") or "")
-            if not old_task_id:
+            task_id = str(data.get("task_id") or "")
+            if not task_id:
                 raise ValueError("缺少 task_id")
-            with _tasks_lock:
-                old_task = _tasks.get(old_task_id)
-                if not old_task:
-                    raise ValueError("任务不存在")
-                input_paths = dict(old_task.get("input_paths") or {})
-                requested = old_task.get("requested_account", "auto")
-                workflow = _workflow_config(old_task.get("workflow_key"))
-
-            if not input_paths:
-                raise ValueError("原任务缺少素材路径，无法重新提交")
-
-            now = time.time()
-            task = _new_task(workflow, input_paths, requested, now)
-            task_id = task["task_id"]
-            with _tasks_lock:
-                _tasks[task_id] = task
-                _task_queue.append(task_id)
-            _dispatch_tasks()
-            with _tasks_lock:
-                response = _public_task(_tasks[task_id])
-            return self._json(response)
+            return self._json(_restart_task_in_place(task_id))
 
         if path == "/api/batch-run":
             workflow = _workflow_config(data.get("workflow"))
@@ -1609,7 +1893,7 @@ def main():
         kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
         kernel32.CreateMutexW.restype = ctypes.c_void_p
         instance_mutex = kernel32.CreateMutexW(
-            None, False, "Local\\YunComfyUI-Client-8080"
+            None, False, "Local\\YunComfyUI-Client"
         )
         if not instance_mutex:
             raise OSError("无法创建工作台单实例锁")
@@ -1618,13 +1902,9 @@ def main():
             kernel32.CloseHandle(instance_mutex)
             return
 
-    actual_port = PORT
-    try:
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", actual_port), Handler)
-    except OSError as exc:
-        raise OSError(
-            f"本机端口 {actual_port} 已被其他程序占用，请关闭占用程序后重试"
-        ) from exc
+    preferred_port = _configured_port()
+    server, actual_port = _create_http_server(preferred_port)
+    server_state_path = _write_server_state(actual_port)
 
     logger.info("Server listening on http://localhost:%d", actual_port)
     server_thread = threading.Thread(
@@ -1649,6 +1929,14 @@ def main():
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=5)
+        try:
+            current_state = json.loads(
+                server_state_path.read_text(encoding="utf-8")
+            )
+            if current_state.get("pid") == os.getpid():
+                server_state_path.unlink(missing_ok=True)
+        except (OSError, ValueError, TypeError):
+            pass
         _executor.shutdown(wait=False, cancel_futures=True)
         _login_executor.shutdown(wait=False, cancel_futures=True)
 

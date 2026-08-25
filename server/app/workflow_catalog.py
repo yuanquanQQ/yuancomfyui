@@ -30,7 +30,7 @@ def input_field(key, label, media_type="image", input_type=None):
 
 def workflow(key, name, description, category, post_id, primary_input,
              inputs, uploads, outputs, *, texts=None, timeout=3000,
-             minimum_run_seconds=300):
+             minimum_run_seconds=300, ignore_task_failure=False):
     return {
         "key": key,
         "name": name,
@@ -48,6 +48,7 @@ def workflow(key, name, description, category, post_id, primary_input,
             "completion": {
                 "markers": ["显示报告", "Show Report"],
                 "minimum_run_seconds": minimum_run_seconds,
+                "ignore_task_failure": ignore_task_failure,
             },
             "strict_outputs": True,
         },
@@ -70,12 +71,6 @@ WORKFLOW_CATALOG = [
         [output(6223, "video", "save video", "save preview")], timeout=7200,
     ),
     workflow(
-        "hd_restore", "高定版高清修复", "去除 AI 感并增强图片细节",
-        "image", "2087951445663510530", "image",
-        [input_field("image", "待修复图片")], [upload("image", 105, "待修复图片")],
-        [output(149, "image", "save image", "save preview")], minimum_run_seconds=30,
-    ),
-    workflow(
         "animate_transfer", "Animate 动作迁移 ProMax", "根据动作视频驱动人物并自动匹配尺寸",
         "video", "2087936157744189442", "reference_image",
         [input_field("motion_video", "动作视频", "video"), input_field("reference_image", "人物参考图")],
@@ -94,6 +89,13 @@ WORKFLOW_CATALOG = [
         "image", "2087933748502417409", "reference",
         [input_field("reference", "参考图片")], [upload("reference", 100, "参考图片")],
         [output(161, "image", "save image", "save preview")], minimum_run_seconds=30,
+    ),
+    workflow(
+        "hd_restore_detail_v2", "高定版高清修复【去AI感加细节】洗图",
+        "上传一张图片，去除 AI 感并增强细节，输出高清修复图",
+        "image", "2087951445663510530", "source",
+        [input_field("source", "原始图片")], [upload("source", 105, "原始图片")],
+        [output(149, "image", "save image", "save preview")], minimum_run_seconds=30,
     ),
     workflow(
         "scail_multi_reference", "极境 SCAIL2 动作迁移（多参考）", "使用动作视频和 6 张人物参考图生成动作迁移视频",
@@ -138,7 +140,10 @@ WORKFLOW_CATALOG = [
         "image", "2089754761372454913", "reference",
         [input_field("reference", "参考图"), input_field("request", "分镜数量与要求", "text", "text")],
         [upload("reference", 41, "参考图")],
-        [output(114, "image", "save image", "save preview")],
+        # Match Qwen multi-view's preview-first batch download path. The
+        # generic Save Image action can save only the selected frame, whereas
+        # Save Preview can be invoked for every generated thumbnail.
+        [output(114, "image", "save preview", "save image")],
         texts=[{"key": "request", "node_id": "127", "widget": "text", "label": "分镜数量与要求", "required": True}],
         timeout=7200, minimum_run_seconds=30,
     ),
@@ -176,4 +181,4 @@ WORKFLOW_CATALOG = [
 ]
 
 def workflow_catalog_response() -> dict:
-    return {"version": 2, "default_workflow_key": DEFAULT_WORKFLOW_KEY, "workflows": WORKFLOW_CATALOG}
+    return {"version": 4, "default_workflow_key": DEFAULT_WORKFLOW_KEY, "workflows": WORKFLOW_CATALOG}

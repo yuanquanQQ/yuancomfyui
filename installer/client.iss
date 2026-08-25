@@ -26,6 +26,7 @@ CloseApplications=yes
 RestartApplications=no
 UsePreviousAppDir=yes
 DisableProgramGroupPage=auto
+InfoBeforeFile=assets\client-data-notice.txt
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "{#SourcePath}languages\ChineseSimplified.isl"
@@ -37,17 +38,18 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Source: "..\client\dist\yuncomfyui.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Dirs]
-Name: "{app}\.license"; Permissions: users-modify
-Name: "{app}\profiles"; Permissions: users-modify
-Name: "{app}\data"; Permissions: users-modify
-Name: "{app}\uploads"; Permissions: users-modify
-Name: "{app}\outputs"; Permissions: users-modify
-Name: "{app}\library"; Permissions: users-modify
-Name: "{app}\works"; Permissions: users-modify
+Name: "{app}\UserData"; Permissions: users-modify
+Name: "{app}\UserData\.license"; Permissions: users-modify
+Name: "{app}\UserData\profiles"; Permissions: users-modify
+Name: "{app}\UserData\data"; Permissions: users-modify
+Name: "{app}\UserData\uploads"; Permissions: users-modify
+Name: "{app}\UserData\outputs"; Permissions: users-modify
+Name: "{app}\UserData\library"; Permissions: users-modify
+Name: "{app}\UserData\works"; Permissions: users-modify
 
 [Icons]
 Name: "{group}\YunComfyUI Client"; Filename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\YunComfyUI Client"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "启动 YunComfyUI 客户端"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "启动 YunComfyUI 客户端"; Flags: nowait postinstall skipifsilent runasoriginaluser

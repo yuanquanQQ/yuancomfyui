@@ -172,13 +172,14 @@ class SchedulerTests(unittest.TestCase):
                 ImmediateFuture({"status": "failed", "error": "download failed"}),
             )
 
-        self.assertEqual("failed", server._tasks["task_a"]["status"])
+        self.assertEqual("queued", server._tasks["task_a"]["status"])
+        self.assertEqual(1, server._tasks["task_a"]["retry_count"])
         self.assertEqual("running", server._tasks["task_b"]["status"])
         self.assertEqual({"account_a"}, server._account_busy)
         self.assertEqual(2, len(submitted))
 
-    def test_timeout_task_is_requeued_up_to_limit(self):
-        """Timed-out tasks are re-queued, then permanently failed after limit."""
+    def test_timeout_task_is_retried_in_place_up_to_limit(self):
+        """Failures retry the same task three times, then finally fail."""
         self.add_account("account_a")
         task_id = "task_timeout_test"
         now = time.time()
@@ -197,7 +198,7 @@ class SchedulerTests(unittest.TestCase):
             "retry_count": 0,
         }
         server._task_queue.append(task_id)
-        server.MAX_TASK_REQUEUES = 2
+        server.MAX_TASK_REQUEUES = 3
 
         # Dispatch — picks up the task
         submitted = []
@@ -210,27 +211,92 @@ class SchedulerTests(unittest.TestCase):
         with mock.patch.object(server._executor, "submit", side_effect=submit):
             server._dispatch_tasks()
             self.assertEqual("running", server._tasks[task_id]["status"])
-            # Simulate timeout
+            for retry_count in range(1, 4):
+                server._finish_task(
+                    task_id,
+                    "account_a",
+                    ImmediateFuture({
+                        "status": "failed",
+                        "error": "任务运行超时（3000 秒），未检测到完成弹窗",
+                    }),
+                )
+                task = server._tasks[task_id]
+                self.assertIn(task["status"], ("queued", "running"))
+                self.assertEqual(retry_count, task["retry_count"])
+                self.assertEqual(task_id, task["original_task_id"])
+                self.assertEqual(retry_count, len(task["attempt_errors"]))
+
             server._finish_task(
                 task_id,
                 "account_a",
                 ImmediateFuture({
-                    "status": "failed",
-                    "error": "任务运行超时（3000 秒），未检测到完成弹窗",
+                    "status": "failed", "error": "第四次仍然失败",
                 }),
             )
 
-        # Original task should be failed
         self.assertEqual("failed", server._tasks[task_id]["status"])
-        # A re-queued task should have been created (may already be running
-        # if _dispatch_tasks picked it up immediately)
-        requeued = [
-            t for t in server._tasks.values()
-            if t.get("original_task_id") == task_id
-        ]
-        self.assertEqual(1, len(requeued))
-        self.assertIn(requeued[0]["status"], ("queued", "running"))
-        self.assertEqual(1, requeued[0]["retry_count"])
+        self.assertEqual(3, server._tasks[task_id]["retry_count"])
+        self.assertEqual("重试 3 次后仍然失败", server._tasks[task_id]["stage_detail"])
+        self.assertEqual(1, len(server._tasks))
+
+    def test_manual_restart_reuses_the_same_task_row(self):
+        self.add_account("account_a")
+        server.WORKFLOWS["scheduler_test"]["primary_input"] = "source"
+        task_id = "task_manual_restart"
+        server._tasks[task_id] = {
+            "task_id": task_id,
+            "workflow_key": "scheduler_test",
+            "workflow_name": "调度测试",
+            "task_name": "source.png",
+            "status": "failed",
+            "requested_account": "auto",
+            "input_paths": {"source": "source.png"},
+            "input_files": {"source": "source.png"},
+            "created_at": time.time() - 60,
+            "started_at": time.time() - 50,
+            "completed_at": time.time() - 1,
+            "stage": "failed",
+            "stage_detail": "重试 3 次后仍然失败",
+            "heartbeat_at": time.time() - 1,
+            "retry_count": 3,
+            "files": [],
+            "error": "failed",
+        }
+        submitted = []
+
+        def submit(*_args):
+            future = FakeFuture()
+            submitted.append(future)
+            return future
+
+        with mock.patch.object(server._executor, "submit", side_effect=submit):
+            response = server._restart_task_in_place(task_id)
+
+        self.assertEqual(1, len(server._tasks))
+        self.assertIs(server._tasks[task_id], server._tasks.get(task_id))
+        self.assertEqual(task_id, response["task_id"])
+        self.assertEqual("running", response["status"])
+        self.assertNotIn("retry_count", server._tasks[task_id])
+        self.assertEqual(1, server._tasks[task_id]["manual_restart_count"])
+        self.assertEqual(1, len(submitted))
+
+    def test_ordinary_and_balance_failures_are_retried(self):
+        self.add_account("account_a")
+        for task_id, error_text in (
+            ("ordinary_failure", "RunningHub 任务列表持续显示任务失败"),
+            ("balance_failure", "RunningHub/API 余额不足"),
+        ):
+            self.add_task(task_id)
+            task = server._tasks[task_id]
+            task.update({"status": "running", "account": "account_a"})
+            server._account_busy.add("account_a")
+            server._finish_task(
+                task_id, "account_a",
+                ImmediateFuture({"status": "failed", "error": error_text}),
+            )
+            self.assertIn(task["status"], ("queued", "running"))
+            self.assertEqual(1, task["retry_count"])
+            self.assertEqual([error_text], task["attempt_errors"])
 
     def test_queue_timeout_marks_task_failed(self):
         self.add_task("task_a")

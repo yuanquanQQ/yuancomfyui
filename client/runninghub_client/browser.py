@@ -1,5 +1,6 @@
 """Generic browser automation for server-configured RunningHub workflows."""
 
+import base64
 import json
 import logging
 import os
@@ -131,6 +132,8 @@ class BrowserRunner:
         self.screenshot_error: Optional[str] = None
         self._screenshot_in_progress = False
         self.cancel_requested = threading.Event()
+        self._cloud_cancel_attempted = False
+        self._cloud_cancel_result = None
 
     def request_cancel(self):
         """Ask the owning worker thread to stop at its next safe checkpoint."""
@@ -141,7 +144,150 @@ class BrowserRunner:
 
     def _raise_if_cancelled(self):
         if self.cancel_requested.is_set():
+            # request_cancel() is called by the HTTP handler thread, while
+            # Playwright's sync API may only be used by this worker thread.
+            # Perform the RunningHub-side cancellation here, at the next safe
+            # worker checkpoint, before unwinding and closing the browser.
+            if self._page is not None and not self._cloud_cancel_attempted:
+                self._cloud_cancel_attempted = True
+                try:
+                    self._report_progress(
+                        "cancelling", "正在取消 RunningHub 云端任务"
+                    )
+                    self._cloud_cancel_result = (
+                        self._cancel_runninghub_task_from_sidebar()
+                    )
+                except Exception as exc:
+                    self._cloud_cancel_result = {
+                        "clicked": False, "error": str(exc)[:300],
+                    }
+                    logger.warning(
+                        "RunningHub cloud cancellation failed: %s", exc,
+                    )
             raise RuntimeError("任务已取消")
+
+    def _cancel_runninghub_task_from_sidebar(self):
+        """Cancel the newest active task in RunningHub's right sidebar.
+
+        The local API handler only sets ``cancel_requested`` because
+        Playwright is thread-bound. This method runs in the browser worker and
+        clicks the visible Cancel action belonging to the newest generating or
+        queued task, then accepts a cancellation confirmation dialog if one is
+        shown.
+        """
+        if not self._page:
+            return {"clicked": False, "reason": "page_not_available"}
+
+        result = self._page.evaluate(
+            r"""() => {
+                const visible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && Number(style.opacity || 1) > 0
+                        && rect.width > 0 && rect.height > 0;
+                };
+                const exactCancel = /^(取消|Cancel)$/i;
+                const activeText = /(生成中|生产中|排队中|Generating|Running|Queued)/i;
+                const candidates = [];
+                for (const el of document.querySelectorAll(
+                    'button, a, [role="button"], span, div'
+                )) {
+                    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (!exactCancel.test(text) || !visible(el)) continue;
+                    const clickable = el.closest('button, a, [role="button"]') || el;
+                    if (!visible(clickable) || clickable.disabled) continue;
+                    const rect = clickable.getBoundingClientRect();
+                    let ancestor = clickable;
+                    let card = null;
+                    for (let depth = 0; ancestor && depth < 10; depth++) {
+                        const ancestorText = (ancestor.textContent || '')
+                            .replace(/\s+/g, ' ').trim();
+                        if (activeText.test(ancestorText)
+                                && ancestorText.length < 1500) {
+                            card = ancestor;
+                            break;
+                        }
+                        ancestor = ancestor.parentElement;
+                    }
+                    const cardText = card
+                        ? (card.textContent || '').replace(/\s+/g, ' ').trim()
+                        : '';
+                    // Prefer a cancel action inside an active task card on the
+                    // right side. The topmost such card is RunningHub's newest
+                    // task; older failed history entries appear below it.
+                    let score = rect.top;
+                    if (rect.left > window.innerWidth * 0.60) score -= 10000;
+                    if (card && activeText.test(cardText)) score -= 20000;
+                    candidates.push({clickable, cardText, rect, score});
+                }
+                candidates.sort((a, b) => a.score - b.score);
+                const target = candidates[0];
+                if (!target) {
+                    return {clicked: false, reason: 'active_cancel_not_found'};
+                }
+                target.clickable.click();
+                return {
+                    clicked: true,
+                    text: (target.clickable.textContent || '').trim(),
+                    cardText: target.cardText.slice(0, 500),
+                    position: {
+                        left: Math.round(target.rect.left),
+                        top: Math.round(target.rect.top),
+                    },
+                };
+            }"""
+        )
+        if not isinstance(result, dict) or not result.get("clicked"):
+            logger.info("RunningHub active task cancel not found: %s", result)
+            return result or {
+                "clicked": False, "reason": "active_cancel_not_found",
+            }
+
+        logger.info("Clicked RunningHub task Cancel action: %s", result)
+        self._page.wait_for_timeout(800)
+
+        confirmation = self._page.evaluate(
+            r"""() => {
+                const visible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && Number(style.opacity || 1) > 0
+                        && rect.width > 0 && rect.height > 0;
+                };
+                for (const dialog of document.querySelectorAll(
+                    '[role="dialog"], [role="alertdialog"], .ant-modal-content, '
+                    + '.p-dialog, [class*="modal"], [class*="dialog"]'
+                )) {
+                    if (!visible(dialog)) continue;
+                    const dialogText = (dialog.textContent || '')
+                        .replace(/\s+/g, ' ').trim();
+                    if (!/(取消|cancel|停止|终止)/i.test(dialogText)) continue;
+                    for (const el of dialog.querySelectorAll(
+                        'button, a, [role="button"]'
+                    )) {
+                        if (!visible(el) || el.disabled) continue;
+                        const text = (el.textContent || '')
+                            .replace(/\s+/g, ' ').trim();
+                        if (/^(确认取消|确定|确认|是|Yes|Confirm)$/i.test(text)) {
+                            el.click();
+                            return {clicked: true, text};
+                        }
+                    }
+                }
+                return {clicked: false};
+            }"""
+        )
+        if isinstance(confirmation, dict) and confirmation.get("clicked"):
+            logger.info(
+                "Confirmed RunningHub task cancellation: %s", confirmation,
+            )
+            self._page.wait_for_timeout(800)
+        result["confirmation"] = confirmation
+        return result
 
     def _report_progress(self, stage, detail):
         logger.info("Stage %s: %s", stage, detail)
@@ -155,6 +301,21 @@ class BrowserRunner:
         if self.workflow_spec is None:
             raise ValueError("缺少服务器工作流执行配置")
         return self.workflow_spec
+
+    def _write_download_diagnostic(self, payload):
+        """Persist the last output-node inspection for post-run debugging."""
+        try:
+            path = self.user_data_dir / "download_diagnostic.json"
+            data = {
+                "written_at": time.time(),
+                "workflow_id": self.workflow_id,
+                "post_id": self.post_id,
+                "workflow_name": getattr(self.workflow_spec, "name", None),
+                **(payload if isinstance(payload, dict) else {"detail": payload}),
+            }
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.debug("Download diagnostic write failed: %s", exc)
 
     def _candidate_workflow_urls(self):
         if self.workflow_url:
@@ -173,49 +334,114 @@ class BrowserRunner:
         self._raise_if_cancelled()
         url = f"https://www.runninghub.cn/post/{self.post_id}"
         logger.info("Navigating to post %s", url)
-        self._page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-        run_button = self._page.get_by_text("运行工作流", exact=True).last
-        for attempt in range(1, 4):
+        last_error = None
+        for navigation_attempt in range(1, 4):
             self._raise_if_cancelled()
-            self._dismiss_rife_popup()
-            self._dismiss_popups()
+            try:
+                self._page.goto(
+                    url, wait_until="domcontentloaded", timeout=60000,
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Post navigation failed (%d/3): %s",
+                    navigation_attempt, str(exc)[:200],
+                )
+                if navigation_attempt < 3:
+                    self._page.wait_for_timeout(1500 * navigation_attempt)
+                continue
+
+            run_button = self._page.get_by_text("运行工作流", exact=True).last
             try:
                 run_button.wait_for(state="visible", timeout=30000)
             except Exception as exc:
                 body = self._page.locator("body").inner_text(timeout=5000)
-                if "登录" in body:
+                if any(marker in body for marker in (
+                        "验证码登录", "扫码登录", "密码登录")):
                     raise RuntimeError("账号登录状态已失效，请重新登录") from exc
-                raise RuntimeError("Post 页面没有找到“运行工作流”按钮") from exc
+                last_error = exc
+                logger.info(
+                    "Post page did not expose the run button (%d/3); "
+                    "reloading the post", navigation_attempt,
+                )
+                continue
 
-            pages_before = set(self._context.pages)
-            run_button.click(timeout=15000)
-            self._page.wait_for_timeout(2500)
-            new_pages = [page for page in self._context.pages if page not in pages_before]
-            if new_pages:
-                self._page = new_pages[-1]
-                self._page.wait_for_load_state("domcontentloaded", timeout=60000)
-                break
-            if "/post/" not in self._page.url:
-                break
-            logger.info(
-                "Post run action did not navigate (attempt %d/3); "
-                "dismissing overlays and retrying", attempt,
-            )
-        else:
-            raise RuntimeError("点击“运行工作流”后页面没有进入工作流")
+            original_page = self._page
+            for click_attempt in range(1, 3):
+                self._raise_if_cancelled()
+                self._dismiss_rife_popup()
+                self._dismiss_popups()
+                pages_before = set(self._context.pages)
+                try:
+                    run_button.click(timeout=15000)
+                    self._page.wait_for_timeout(2500)
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Post run action failed (%d/2 in navigation %d/3): %s",
+                        click_attempt, navigation_attempt, str(exc)[:160],
+                    )
+                    continue
 
-        try:
-            body = self._page.locator("body").inner_text(timeout=5000)
-            if "验证码登录" in body or "扫码登录" in body:
-                raise RuntimeError("账号登录状态已失效，请重新登录")
-        except RuntimeError:
-            raise
-        except Exception:
-            pass
+                new_pages = [
+                    page for page in self._context.pages
+                    if page not in pages_before
+                ]
+                # RunningHub can both navigate the current (left) page and
+                # open a duplicate on its right. Only select a page after its
+                # URL has actually entered /workflow/; an about:blank popup is
+                # not proof that the action succeeded.
+                candidates = [original_page, *new_pages]
+                workflow_pages = [
+                    page for page in candidates
+                    if "/workflow/" in (page.url or "")
+                    or "#/workflow/" in (page.url or "")
+                ]
+                if not workflow_pages:
+                    for candidate in new_pages:
+                        try:
+                            candidate.wait_for_load_state(
+                                "domcontentloaded", timeout=15000,
+                            )
+                        except Exception:
+                            pass
+                        if ("/workflow/" in (candidate.url or "")
+                                or "#/workflow/" in (candidate.url or "")):
+                            workflow_pages.append(candidate)
+                            break
+                if workflow_pages:
+                    self._page = workflow_pages[0]
+                    ordered_pages = list(self._context.pages)
+                    logger.info(
+                        "Selected left workflow page %d/%d: %s",
+                        ordered_pages.index(self._page) + 1,
+                        len(ordered_pages), self._page.url,
+                    )
+                    self._comfy = self._find_comfy_frame()
+                    logger.info("Workflow loaded from post %s", self.post_id)
+                    return
 
-        self._comfy = self._find_comfy_frame()
-        logger.info("Workflow loaded from post %s", self.post_id)
+                last_error = RuntimeError(
+                    "点击“运行工作流”后页面没有进入工作流"
+                )
+                logger.info(
+                    "Post run action did not navigate (%d/2 in navigation "
+                    "%d/3); dismissing overlays and retrying",
+                    click_attempt, navigation_attempt,
+                )
+
+            # A click-only retry cannot recover a stale or half-loaded Vue
+            # page. Restore the post page and repeat the complete navigation.
+            self._page = original_page
+            if navigation_attempt < 3:
+                self._page.wait_for_timeout(1500 * navigation_attempt)
+
+        if isinstance(last_error, RuntimeError):
+            raise last_error
+        if last_error is not None:
+            raise RuntimeError("RunningHub Post 页面网络连接失败，请稍后重试") \
+                from last_error
+        raise RuntimeError("点击“运行工作流”后页面没有进入工作流")
 
     # =================================================================
     # Setup / Teardown
@@ -273,6 +499,11 @@ class BrowserRunner:
             viewport={"width": 1280, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36",
         )
+        # Cloud desktops and cross-region links often have high latency. Keep
+        # individual UI actions bounded, but give navigation and media
+        # transfers enough time to survive temporary packet loss.
+        self._context.set_default_timeout(45000)
+        self._context.set_default_navigation_timeout(90000)
         # Inject saved session state via explicit add_cookies() instead of the
         # storage_state= kwarg.  The kwarg path silently drops cookies in some
         # PyInstaller-bundled runtimes (state.json looks correct on disk, but
@@ -353,6 +584,24 @@ class BrowserRunner:
         raise RuntimeError("ComfyUI iframe not ready after 60s")
 
     def stop(self):
+        keep_open_seconds = 0
+        if not self.headless:
+            try:
+                keep_open_seconds = max(
+                    0, int(os.environ.get("YUNCOMFYUI_KEEP_BROWSER_SECONDS", "0"))
+                )
+            except (TypeError, ValueError):
+                keep_open_seconds = 0
+        if (keep_open_seconds and not self.cancel_requested.is_set()
+                and (self._browser or self._page)):
+            logger.info(
+                "Keeping headed browser open for %d seconds for inspection.",
+                keep_open_seconds,
+            )
+            try:
+                time.sleep(keep_open_seconds)
+            except Exception:
+                pass
         # Release any HTTP handler thread waiting on a screenshot
         if not self.screenshot_ready.is_set():
             self.screenshot_error = "Browser has been stopped"
@@ -760,22 +1009,34 @@ class BrowserRunner:
                 "  Upload via APIRequest: %d bytes -> %s field=%s",
                 len(raw), endpoint, field_name,
             )
-            try:
-                response = self._page.request.post(
-                    endpoint,
-                    multipart={field_name: (fp.name, raw, mime)},
-                    timeout=60000,
-                )
-                logger.info("  HTTP %d: %s", response.status, response.text()[:200])
-                if response.status != 200:
-                    raise RuntimeError(
-                        f"Upload HTTP {response.status}: {response.text()[:200]}"
+            for request_attempt in range(1, 4):
+                try:
+                    response = self._page.request.post(
+                        endpoint,
+                        multipart={field_name: (fp.name, raw, mime)},
+                        timeout=180000,
                     )
-                data = response.json()
+                    logger.info(
+                        "  HTTP %d: %s", response.status,
+                        response.text()[:200],
+                    )
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"Upload HTTP {response.status}: "
+                            f"{response.text()[:200]}"
+                        )
+                    data = response.json()
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "  Upload request failed (%d/3): %s",
+                        request_attempt, str(exc)[:120],
+                    )
+                    if request_attempt < 3:
+                        self._page.wait_for_timeout(1000 * request_attempt)
+            if data is not None:
                 break
-            except Exception as exc:
-                last_error = exc
-                logger.info("  Upload target failed, trying fallback: %s", str(exc)[:120])
         if data is None:
             raise RuntimeError("All direct upload endpoints failed") from last_error
 
@@ -810,6 +1071,244 @@ class BrowserRunner:
     # Precise Positioning
     # =================================================================
 
+    def _workflow_target_node_ids(self, inputs):
+        """Return the configured nodes that must be visible for this run."""
+        node_ids = []
+        node_ids.extend(
+            upload.node_id
+            for upload, _path in self.workflow_spec.resolve_uploads(inputs)
+        )
+        node_ids.extend(
+            text_input.node_id
+            for text_input, _value in self.workflow_spec.resolve_texts(inputs)
+        )
+        node_ids.extend(output.node_id for output in self.workflow_spec.outputs)
+        return list(dict.fromkeys(str(node_id) for node_id in node_ids))
+
+    def _fit_nodes_on_canvas(self, node_ids, *, stabilize_ms=1000,
+                             max_attempts=10):
+        """Repeatedly fit nodes until every target is actually clickable."""
+        node_ids = list(dict.fromkeys(str(node_id) for node_id in node_ids))
+        if not node_ids:
+            return {"ok": True, "nodeIds": []}
+
+        last_verification = None
+        for attempt in range(1, max(1, int(max_attempts)) + 1):
+            self._raise_if_cancelled()
+            result = self._comfy.evaluate(
+                """({nodeIds, attempt}) => {
+                if (!app.canvas || !app.canvas.ds || !app.canvas.canvas
+                        || typeof app.canvas.centerOnNode !== 'function') {
+                    return {error: 'canvas_not_ready'};
+                }
+                try {
+                    if (typeof app.canvas.resize === 'function') {
+                        app.canvas.resize();
+                    }
+                } catch (_) {}
+                const nodes = [];
+                const missing = [];
+                for (const nodeId of nodeIds) {
+                    const node = app.graph.getNodeById(Number(nodeId));
+                    if (node) nodes.push(node);
+                    else missing.push(String(nodeId));
+                }
+                if (!nodes.length) {
+                    return {error: 'nodes_not_found', missing};
+                }
+
+                const left = Math.min(...nodes.map(node => Number(node.pos[0])));
+                const top = Math.min(...nodes.map(node => Number(node.pos[1])));
+                const right = Math.max(...nodes.map(
+                    node => Number(node.pos[0]) + Number(node.size[0])
+                ));
+                const bottom = Math.max(...nodes.map(
+                    node => Number(node.pos[1]) + Number(node.size[1])
+                ));
+                const graphWidth = Math.max(1, right - left);
+                const graphHeight = Math.max(1, bottom - top);
+                const canvasWidth = app.canvas.canvas.width;
+                const canvasHeight = app.canvas.canvas.height;
+                // RunningHub's task list opens over the right side of the
+                // iframe. Reserve that area even though iframe hit-testing
+                // cannot see the parent-page overlay.
+                const rightReserve = Math.min(
+                    460,
+                    Math.max(220, canvasWidth * 0.34),
+                    canvasWidth * 0.45
+                );
+                // Increase the safe inset on retries. This pulls targets away
+                // from toolbars and iframe edges that can intercept clicks.
+                const padding = Math.min(240, 64 + (attempt - 1) * 20);
+                const scale = Math.max(0.02, Math.min(
+                    1,
+                    Math.max(
+                        1, canvasWidth - rightReserve - padding * 2
+                    ) / graphWidth,
+                    Math.max(1, canvasHeight - padding * 2) / graphHeight
+                ));
+                app.canvas.ds.scale = scale;
+                // Extend the virtual bounds on the right. LiteGraph therefore
+                // centers the real target nodes inside the unobstructed left
+                // region without relying on version-specific offset math.
+                const reservedGraphWidth = rightReserve / scale;
+                app.canvas.centerOnNode({
+                    pos: [left, top],
+                    size: [graphWidth + reservedGraphWidth, graphHeight],
+                });
+                app.canvas.setDirty(true, true);
+                return {
+                    ok: true,
+                    nodeIds: nodes.map(node => String(node.id)),
+                    missing,
+                    scale,
+                    rightReserve,
+                    bounds: {left, top, right, bottom},
+                    offset: [...app.canvas.ds.offset],
+                };
+            }""",
+                {"nodeIds": node_ids, "attempt": attempt},
+            )
+            if isinstance(result, dict) and result.get("error"):
+                raise RuntimeError(f"Canvas auto-fit failed: {result}")
+            if isinstance(result, dict) and result.get("missing"):
+                raise RuntimeError(
+                    f"Canvas auto-fit could not find nodes: {result['missing']}"
+                )
+
+            self._comfy.wait_for_timeout(stabilize_ms)
+            verification = self._comfy.evaluate(
+                """(nodeIds) => {
+                const canvas = app.canvas && app.canvas.canvas;
+                const ds = app.canvas && app.canvas.ds;
+                if (!canvas || !ds) {
+                    return {error: 'canvas_not_ready', nonClickableNodeIds: nodeIds};
+                }
+                const rect = canvas.getBoundingClientRect();
+                if (!rect.width || !rect.height || !canvas.width || !canvas.height) {
+                    return {error: 'canvas_has_no_size', nonClickableNodeIds: nodeIds};
+                }
+                const visible = new Set(
+                    (app.canvas.visible_nodes || []).map(node => String(node.id))
+                );
+                const cssScaleX = rect.width / canvas.width;
+                const cssScaleY = rect.height / canvas.height;
+                const safeInset = 36;
+                const rightReserve = Math.min(
+                    460,
+                    Math.max(220, rect.width * 0.34),
+                    rect.width * 0.45
+                );
+                const rightSafeBoundary = rect.width - rightReserve - safeInset;
+                const toCanvas = (x, y) => {
+                    if (typeof ds.convertOffsetToCanvas === 'function') {
+                        const input = [x, y];
+                        const output = [0, 0];
+                        const converted = ds.convertOffsetToCanvas(input, output);
+                        const point = converted || output;
+                        if (Number.isFinite(point[0]) && Number.isFinite(point[1])) {
+                            return point;
+                        }
+                    }
+                    return [
+                        (x + ds.offset[0]) * ds.scale,
+                        (y + ds.offset[1]) * ds.scale,
+                    ];
+                };
+                const details = nodeIds.map(nodeId => {
+                    const node = app.graph.getNodeById(Number(nodeId));
+                    if (!node) {
+                        return {nodeId: String(nodeId), clickable: false,
+                            reasons: ['node_not_found']};
+                    }
+                    const center = toCanvas(
+                        Number(node.pos[0]) + Number(node.size[0]) / 2,
+                        Number(node.pos[1]) + Number(node.size[1]) / 2
+                    );
+                    const x = center[0] * cssScaleX;
+                    const y = center[1] * cssScaleY;
+                    const screenWidth = Number(node.size[0]) * ds.scale * cssScaleX;
+                    const screenHeight = Number(node.size[1]) * ds.scale * cssScaleY;
+                    const nodeInside = x - screenWidth / 2 >= safeInset
+                        && y - screenHeight / 2 >= safeInset
+                        && x + screenWidth / 2 <= rightSafeBoundary
+                        && y + screenHeight / 2 <= rect.height - safeInset;
+                    const hit = nodeInside
+                        ? document.elementFromPoint(rect.left + x, rect.top + y)
+                        : null;
+                    const hitCanvas = hit === canvas || (hit && canvas.contains(hit));
+                    const reasons = [];
+                    const diagnostics = [];
+                    if (!visible.has(String(node.id))) reasons.push('not_rendered');
+                    if (!nodeInside) reasons.push('node_outside_left_safe_area');
+                    if (screenWidth < 10 || screenHeight < 10) {
+                        diagnostics.push('small_on_screen');
+                    }
+                    // Upload and save operations invoke the configured widget
+                    // or node callback directly. A DOM element covering the
+                    // node centre (for example a Comfy toolbar/widget overlay)
+                    // does not make that callback unusable. Keep this as a
+                    // diagnostic only; parent-page task-list protection is
+                    // enforced by nodeInside/rightSafeBoundary above.
+                    if (!hitCanvas) diagnostics.push('center_dom_hit_is_not_canvas');
+                    return {
+                        nodeId: String(node.id),
+                        clickable: reasons.length === 0,
+                        reasons,
+                        diagnostics,
+                        center: {x: Math.round(x), y: Math.round(y)},
+                        screenSize: {
+                            width: Math.round(screenWidth),
+                            height: Math.round(screenHeight),
+                        },
+                    };
+                });
+                return {
+                    visibleNodeIds: [...visible],
+                    nodes: details,
+                    nonClickableNodeIds: details.filter(item => !item.clickable)
+                        .map(item => item.nodeId),
+                    canvas: {
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height),
+                        rightReserve: Math.round(rightReserve),
+                        rightSafeBoundary: Math.round(rightSafeBoundary),
+                    },
+                    scale: ds.scale,
+                };
+            }""",
+                node_ids,
+            )
+            last_verification = verification
+            non_clickable = (
+                verification.get("nonClickableNodeIds", node_ids)
+                if isinstance(verification, dict) else node_ids
+            )
+            if not non_clickable:
+                result["attempts"] = attempt
+                result["verification"] = verification
+                logger.info(
+                    "Canvas targets clickable after %d attempt(s): %s",
+                    attempt, verification,
+                )
+                return result
+
+            logger.warning(
+                "Canvas targets not clickable after attempt %d/%d: %s",
+                attempt, max_attempts, verification,
+            )
+            if attempt < max_attempts:
+                self._comfy.wait_for_timeout(500)
+
+        details = (
+            last_verification.get("nodes", [])
+            if isinstance(last_verification, dict) else last_verification
+        )
+        raise RuntimeError(
+            "Canvas auto-fit could not make configured nodes clickable: "
+            f"{details}"
+        )
+
     def _widget_screen_pos(self, node_id, widget_name):
         js = (
             "(function(){"
@@ -837,21 +1336,102 @@ class BrowserRunner:
             return None
         return result
 
-    def _center_node_on_canvas(self, node_id):
-        js = (
-            "(function(){"
-            "var n=app.graph.getNodeById(" + node_id + ");"
-            "if(!n)return{error:'node_not_found'};"
-            "var cx=n.pos[0]+n.size[0]/2;var cy=n.pos[1]+n.size[1]/2;"
-            "var scale=app.canvas.ds.scale||1;"
-            "app.canvas.ds.offset[0]=-cx*scale+app.canvas.canvas.width/2;"
-            "app.canvas.ds.offset[1]=-cy*scale+app.canvas.canvas.height/2;"
-            "app.canvas.setDirty(true,true);"
-            "return{ok:true};"
-            "})()"
+    def _center_node_on_canvas(self, node_id, *, stabilize_ms=500,
+                               verify=False):
+        """Use LiteGraph's native node-centering operation."""
+        script = """(nodeId) => {
+            const node = app.graph.getNodeById(Number(nodeId));
+            if (!node) return {error: 'node_not_found'};
+            if (!app.canvas || typeof app.canvas.centerOnNode !== 'function') {
+                return {error: 'center_on_node_unavailable'};
+            }
+            app.canvas.centerOnNode(node);
+            app.canvas.setDirty(true, true);
+            return {
+                ok: true,
+                nodeId: String(node.id),
+                scale: app.canvas.ds.scale,
+                offset: [...app.canvas.ds.offset],
+            };
+        }"""
+        result = self._comfy.evaluate(script, node_id)
+        if isinstance(result, dict) and result.get("error"):
+            raise RuntimeError(f"Node positioning failed: {result['error']}")
+        self._comfy.wait_for_timeout(stabilize_ms)
+
+        if not verify:
+            return result
+
+        verification = self._comfy.evaluate(
+            """(nodeId) => {
+                const node = app.graph.getNodeById(Number(nodeId));
+                if (!node) return {error: 'node_not_found'};
+                return {
+                    nodeId: String(node.id),
+                    visibleNodes: (app.canvas.visible_nodes || [])
+                        .map(item => String(item.id)),
+                };
+            }""",
+            node_id,
         )
-        self._comfy.evaluate(js)
-        self._comfy.wait_for_timeout(500)
+        if (isinstance(verification, dict)
+                and str(node_id) not in verification.get("visibleNodes", [])):
+            logger.warning(
+                "Node %s is not visible after centering: %s; retrying",
+                node_id, verification,
+            )
+            result = self._comfy.evaluate(script, node_id)
+            self._comfy.wait_for_timeout(2000)
+        logger.info(
+            "Node %s center result=%s verification=%s",
+            node_id, result, verification,
+        )
+        return result
+
+    def _set_canvas_zoom(self, percent=15):
+        """Set canvas zoom without changing its pan/offset position."""
+        scale = max(0.05, min(2.0, float(percent) / 100.0))
+        result = self._comfy.evaluate(
+            """(scale) => {
+                if (!app.canvas || !app.canvas.ds) {
+                    return {error: 'canvas_not_ready'};
+                }
+                const previousOffset = [...app.canvas.ds.offset];
+                app.canvas.ds.scale = scale;
+                app.canvas.setDirty(true, true);
+                return {
+                    ok: true,
+                    scale: app.canvas.ds.scale,
+                    offset: [...app.canvas.ds.offset],
+                    offsetUnchanged: previousOffset[0] === app.canvas.ds.offset[0]
+                        && previousOffset[1] === app.canvas.ds.offset[1],
+                };
+            }""",
+            scale,
+        )
+        if isinstance(result, dict) and result.get("error"):
+            raise RuntimeError(f"Canvas zoom failed: {result['error']}")
+        logger.info("Canvas zoom set to %.0f%% without moving: %s", percent, result)
+        return result
+
+    def _pan_canvas_right_once(self):
+        """Pan the visible ComfyUI canvas in the corrected direction once."""
+        rect = self._comfy.locator("canvas").first.bounding_box()
+        if not rect or rect["width"] <= 0 or rect["height"] <= 0:
+            raise RuntimeError("Canvas is not visible for left pan")
+        start_x = rect["x"] + rect["width"] * 0.10
+        start_y = rect["y"] + rect["height"] * 0.50
+        end_x = rect["x"] + rect["width"] * 0.90
+        logger.info(
+            "Panning canvas right once: (%.1f, %.1f) -> (%.1f, %.1f)",
+            start_x, start_y, end_x, start_y,
+        )
+        self._page.mouse.move(start_x, start_y)
+        self._page.mouse.down(button="middle")
+        self._page.mouse.move(end_x, start_y, steps=12)
+        self._page.mouse.up(button="middle")
+        self._comfy.wait_for_timeout(2000)
+        return {"ok": True, "distance": round(end_x - start_x, 1)}
 
     # =================================================================
     # Run
@@ -1177,6 +1757,11 @@ class BrowserRunner:
             ("oom", "WanVideo Sampler"),
             ("vhs_error", "ZeroDivisionError"),
             ("vhs_error", "VHS_LoadVideo"),
+            ("balance", "balance is insufficient"),
+            ("balance", "余额不足"),
+            ("workflow_error", "list index out of range"),
+            ("workflow_error", "too many indices for tensor"),
+            ("workflow_error", "tuple indices must be integers"),
         ]
 
         script = r"""
@@ -1280,9 +1865,11 @@ class BrowserRunner:
                         + '.ant-modal-confirm, [class*="dialog"], [class*="modal"]'
                     );
                     if (popup && visible(popup)) {
+                        const popupText = (popup.textContent || '')
+                            .replace(/\s+/g, ' ').trim();
                         return {
                             marker: text,
-                            text: (popup.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 500),
+                            text: popupText.slice(0, 500),
                         };
                     }
 
@@ -1308,6 +1895,117 @@ class BrowserRunner:
                 logger.debug("Completion popup check failed in %s: %s",
                              scope_name, str(exc)[:120])
         return None
+
+    def _visible_error_dialog_text(self):
+        """Return the most specific visible error dialog text available."""
+        script = r"""
+            () => {
+                const visible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && Number(style.opacity || 1) > 0
+                        && rect.width > 0 && rect.height > 0;
+                };
+                const candidates = [];
+                for (const el of document.querySelectorAll(
+                    '[role="alertdialog"], [role="alert"], [role="dialog"], '
+                    + '.ant-modal-content, .ant-modal-confirm, .p-dialog, '
+                    + '[class*="error"], [class*="Error"], '
+                    + '[class*="notification"], [class*="toast-message"]'
+                )) {
+                    if (!visible(el)) continue;
+                    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (!text || text === '显示报告' || text === 'Show Report') continue;
+                    if (!/(error|failed|failure|exception|insufficient|错误|失败|异常|不足)/i.test(text)) {
+                        continue;
+                    }
+                    candidates.push(text.slice(0, 800));
+                }
+                candidates.sort((a, b) => a.length - b.length);
+                return candidates[0] || null;
+            }
+        """
+        for scope_name, scope in (("ComfyUI iframe", self._comfy),
+                                  ("main page", self._page)):
+            if not scope:
+                continue
+            try:
+                text = scope.evaluate(script)
+                if text:
+                    logger.warning(
+                        "Visible error dialog in %s: %s",
+                        scope_name, str(text)[:300],
+                    )
+                    return str(text)
+            except Exception as exc:
+                logger.debug(
+                    "Visible error dialog check failed in %s: %s",
+                    scope_name, str(exc)[:120],
+                )
+        return None
+
+    def _output_media_fingerprints(self):
+        """Snapshot media owned by configured output nodes."""
+        if not self._comfy:
+            return {}
+        try:
+            result = self._comfy.evaluate(
+                """(nodeIds) => {
+                    const snapshot = {};
+                    const add = (items, values) => {
+                        if (!Array.isArray(items)) return;
+                        for (const item of items) {
+                            if (!item) continue;
+                            if (typeof item === 'string') {
+                                values.push(item);
+                                continue;
+                            }
+                            const src = item.currentSrc || item.src || '';
+                            if (src) values.push(String(src));
+                            if (item.filename) {
+                                values.push(JSON.stringify({
+                                    filename: item.filename,
+                                    subfolder: item.subfolder || '',
+                                    type: item.type || 'output',
+                                }));
+                            }
+                        }
+                    };
+                    for (const nodeId of nodeIds) {
+                        const node = app.graph.getNodeById(Number(nodeId));
+                        const outputData = node && app.nodeOutputs
+                            ? (app.nodeOutputs[node.id]
+                                || app.nodeOutputs[String(node.id)] || {}) : {};
+                        const values = [];
+                        add(node && node.imgs, values);
+                        add(node && node.images, values);
+                        add(outputData.imgs, values);
+                        add(outputData.images, values);
+                        add(outputData.videos, values);
+                        add(outputData.audio, values);
+                        snapshot[String(nodeId)] = [...new Set(values)].sort();
+                    }
+                    return snapshot;
+                }""",
+                [output.node_id for output in self.workflow_spec.outputs],
+            )
+            return result if isinstance(result, dict) else {}
+        except Exception as exc:
+            logger.debug("Output media snapshot failed: %s", str(exc)[:160])
+            return {}
+
+    @staticmethod
+    def _has_new_output_media(baseline, current):
+        """Return True when an output node acquired a new media signature."""
+        baseline = baseline or {}
+        current = current or {}
+        for node_id, values in current.items():
+            old_values = set(baseline.get(str(node_id)) or [])
+            if set(values or []) - old_values:
+                return True
+        return False
 
     def _current_task_list_state(self):
         """Return the status of the newest visible RunningHub task-list item.
@@ -1514,6 +2212,35 @@ class BrowserRunner:
                             self._page.wait_for_timeout(500)
                 except Exception:
                     pass
+
+    def _dismiss_stale_completion_popup(self):
+        """Clear a leftover final-report dialog before configuring a run.
+
+        Some accounts reopen the workflow with the previous run's
+        ``显示报告``/``Show Report`` dialog still visible.  That dialog lives
+        in either the page or the ComfyUI iframe and can block canvas actions
+        and uploads, so handle it before any workflow setup.  This method is
+        intentionally separate from the completion polling path: a report
+        popup detected after the run is still the authoritative success
+        signal.
+        """
+        self._dismiss_comfy_popups()
+        self._dismiss_rife_popup()
+        self._dismiss_popups()
+        self._page.wait_for_timeout(500)
+
+        popup = self._visible_completion_popup()
+        if not popup:
+            return
+
+        logger.info(
+            "Dismissing stale Show Report popup before workflow setup: %s",
+            popup.get("text", "")[:200] if isinstance(popup, dict) else popup,
+        )
+        self._dismiss_comfy_popups()
+        self._dismiss_rife_popup()
+        self._dismiss_popups()
+        self._page.wait_for_timeout(1000)
 
     def _diagnose_comfy_popups(self):
         """Inject JS to snapshot all visible dialog/modal/popup elements
@@ -1758,6 +2485,15 @@ class BrowserRunner:
         base_dir = Path(output_dir)
         base_dir.mkdir(parents=True, exist_ok=True)
         saved = []
+        self._write_download_diagnostic({
+            "stage": "download_started",
+            "output_dir": str(output_dir),
+            "configured_outputs": [
+                {"node_id": o.node_id, "media_type": o.media_type,
+                 "menu_actions": list(o.menu_actions)}
+                for o in self.workflow_spec.outputs
+            ],
+        })
 
         self._dismiss_comfy_popups()
         self._page.wait_for_timeout(1000)
@@ -1775,11 +2511,18 @@ class BrowserRunner:
                 if output.media_type == "image":
                     media_saved = self._download_output_node_media(base_dir, output)
                     if media_saved:
-                        saved.extend(media_saved)
-                        continue
+                        logger.info(
+                            "Configured output node %s succeeded: %s",
+                            output.node_id, media_saved,
+                        )
+                        return media_saved
                 result = self._download_via_context_menu(base_dir, output)
                 if result:
-                    saved.extend(result)
+                    logger.info(
+                        "Configured output node %s succeeded: %s",
+                        output.node_id, result,
+                    )
+                    return result
             except Exception as exc:
                 logger.warning(
                     "Context menu download failed for node %s: %s",
@@ -1942,6 +2685,140 @@ class BrowserRunner:
 
     def _download_output_node_media(self, base_dir, output):
         """Download media URLs owned by one configured output node."""
+        try:
+            inspection = self._comfy.evaluate(
+                """(nodeId) => {
+                    const node = app.graph.getNodeById(Number(nodeId));
+                    const outputData = node && app.nodeOutputs
+                        ? (app.nodeOutputs[node.id] || app.nodeOutputs[String(node.id)] || {}) : {};
+                    const summarize = (items) => (Array.isArray(items) ? items : []).map((item) => {
+                        const src = item && (item.currentSrc || item.src || '');
+                        let safeSrc = String(src || '');
+                        try { safeSrc = safeSrc.split('?')[0]; } catch (_) {}
+                        return {tag: item && item.tagName || null,
+                            complete: !!(item && item.complete),
+                            naturalWidth: item && item.naturalWidth || 0,
+                            naturalHeight: item && item.naturalHeight || 0,
+                            src: safeSrc.slice(0, 300)};
+                    });
+                    return {nodeExists: !!node, nodeType: node && node.type || null,
+                        nodeKeys: node ? Object.keys(node).filter((key) => /img|image|output|preview/i.test(key)).slice(0, 80) : [],
+                        nodeImgs: summarize(node && node.imgs),
+                        nodeImages: Array.isArray(node && node.images) ? node.images : [],
+                        nodeImageRects: Array.isArray(node && node.imageRects) ? node.imageRects.length : 0,
+                        outputKeys: Object.keys(outputData || {}).filter((key) => /img|image|output|preview/i.test(key)).slice(0, 80),
+                        outputImgs: summarize(outputData && outputData.imgs),
+                        outputImages: Array.isArray(outputData && outputData.images) ? outputData.images : []};
+                }""",
+                output.node_id,
+            )
+            self._write_download_diagnostic({
+                "stage": "node_inspection",
+                "node_id": output.node_id,
+                "media_type": output.media_type,
+                "inspection": inspection,
+            })
+        except Exception as exc:
+            self._write_download_diagnostic({
+                "stage": "node_inspection_failed",
+                "node_id": output.node_id,
+                "error": str(exc)[:500],
+            })
+        # Prefer pixels already rendered inside the configured output node.
+        # Some RunningHub image URLs are short-lived/private: Chromium can
+        # display them, while a second HTTP request returns 401. Exporting the
+        # loaded image through a canvas avoids that second network request and
+        # remains strictly scoped to this node.
+        embedded = self._comfy.evaluate(
+            """async (nodeId) => {
+                const node = app.graph.getNodeById(Number(nodeId));
+                if (!node) return [];
+                const outputData = (app.nodeOutputs && app.nodeOutputs[node.id])
+                    || (app.nodeOutputs && app.nodeOutputs[String(node.id)]) || {};
+                const images = [
+                    ...(Array.isArray(node.imgs) ? node.imgs : []),
+                    ...(Array.isArray(outputData.imgs) ? outputData.imgs : []),
+                ];
+                const results = [];
+                const seen = new Set();
+                for (const image of images) {
+                    if (!image) continue;
+                    if (!image.complete || !image.naturalWidth || !image.naturalHeight) {
+                        try { await image.decode(); } catch (_) {}
+                    }
+                    if (!image.naturalWidth || !image.naturalHeight) continue;
+                    const source = image.currentSrc || image.src || '';
+                    if (source && seen.has(source)) continue;
+                    if (source) seen.add(source);
+                    try {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = image.naturalWidth;
+                        canvas.height = image.naturalHeight;
+                        const context = canvas.getContext('2d');
+                        context.drawImage(image, 0, 0);
+                        results.push(canvas.toDataURL('image/png'));
+                    } catch (_) {
+                        try {
+                            if (!source) continue;
+                            const response = await fetch(source, {credentials: 'include'});
+                            if (!response.ok) continue;
+                            const blob = await response.blob();
+                            results.push(await new Promise((resolve, reject) => {
+                                const reader = new FileReader();
+                                reader.onload = () => resolve(reader.result);
+                                reader.onerror = reject;
+                                reader.readAsDataURL(blob);
+                            }));
+                        } catch (_) {}
+                    }
+                }
+                return results;
+            }""",
+            output.node_id,
+        ) or []
+        saved = []
+        if output.media_type == "image":
+            for index, data_url in enumerate(embedded, 1):
+                if not isinstance(data_url, str) or not data_url.startswith(
+                        "data:image/"):
+                    continue
+                try:
+                    header, encoded = data_url.split(",", 1)
+                    if ";base64" not in header:
+                        continue
+                    body = base64.b64decode(encoded, validate=True)
+                    image_signature = (
+                        body.startswith(b"\x89PNG\r\n\x1a\n")
+                        or body.startswith(b"\xff\xd8\xff")
+                        or (body.startswith(b"RIFF")
+                            and body[8:12] == b"WEBP")
+                    )
+                    if not image_signature or len(body) < 10000:
+                        continue
+                    destination = base_dir / (
+                        f"output_{output.node_id}_{index:02d}.png"
+                    )
+                    collision = 1
+                    while destination.exists():
+                        destination = base_dir / (
+                            f"output_{output.node_id}_{index:02d}_"
+                            f"{collision}.png"
+                        )
+                        collision += 1
+                    destination.write_bytes(body)
+                    saved.append(str(destination))
+                    logger.info(
+                        "Saved rendered image from node %s: %s (%d bytes)",
+                        output.node_id, destination, len(body),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Rendered image export failed for node %s: %s",
+                        output.node_id, str(exc)[:160],
+                    )
+            if saved:
+                return saved
+
         sources = self._comfy.evaluate(
             """(nodeId) => {
                 const node = app.graph.getNodeById(Number(nodeId));
@@ -1973,40 +2850,64 @@ class BrowserRunner:
             }""",
             output.node_id,
         ) or []
-        saved = []
         for source in dict.fromkeys(sources):
             if not isinstance(source, str) or not source.startswith("http"):
                 continue
-            try:
-                response = self._page.request.get(source, timeout=120000)
-                body = response.body()
-                content_type = (response.headers.get("content-type") or "").lower()
-                expected = "image" if output.media_type == "image" else "video"
-                image_signature = (
-                    body.startswith(b"\x89PNG\r\n\x1a\n")
-                    or body.startswith(b"\xff\xd8\xff")
-                    or (body.startswith(b"RIFF") and body[8:12] == b"WEBP")
-                )
-                valid_type = expected in content_type
-                if output.media_type == "image":
-                    valid_type = valid_type or image_signature
-                if not response.ok or not valid_type or len(body) < 10000:
-                    continue
-                suffix = ".png" if output.media_type == "image" else ".mp4"
-                parsed = urllib.parse.urlparse(source)
-                query_name = urllib.parse.parse_qs(parsed.query).get("filename", [""])[0]
-                name = Path(query_name or parsed.path).name or f"output_{int(time.time())}{suffix}"
-                if not Path(name).suffix:
-                    name += suffix
-                destination = base_dir / Path(name).name
-                collision = 1
-                while destination.exists():
-                    destination = base_dir / f"{Path(name).stem}_{collision}{Path(name).suffix}"
-                    collision += 1
-                destination.write_bytes(body)
-                saved.append(str(destination))
-            except Exception as exc:
-                logger.debug("Output node media download failed for %s: %s", source[:120], exc)
+            for request_attempt in range(1, 4):
+                try:
+                    response = self._page.request.get(source, timeout=180000)
+                    body = response.body()
+                    content_type = (
+                        response.headers.get("content-type") or ""
+                    ).lower()
+                    expected = (
+                        "image" if output.media_type == "image" else "video"
+                    )
+                    image_signature = (
+                        body.startswith(b"\x89PNG\r\n\x1a\n")
+                        or body.startswith(b"\xff\xd8\xff")
+                        or (body.startswith(b"RIFF")
+                            and body[8:12] == b"WEBP")
+                    )
+                    valid_type = expected in content_type
+                    if output.media_type == "image":
+                        valid_type = valid_type or image_signature
+                    if not response.ok or not valid_type or len(body) < 10000:
+                        raise RuntimeError(
+                            f"invalid media response: status={response.status}, "
+                            f"type={content_type!r}, bytes={len(body)}"
+                        )
+                    suffix = (
+                        ".png" if output.media_type == "image" else ".mp4"
+                    )
+                    parsed = urllib.parse.urlparse(source)
+                    query_name = urllib.parse.parse_qs(parsed.query).get(
+                        "filename", [""]
+                    )[0]
+                    name = (
+                        Path(query_name or parsed.path).name
+                        or f"output_{int(time.time())}{suffix}"
+                    )
+                    if not Path(name).suffix:
+                        name += suffix
+                    destination = base_dir / Path(name).name
+                    collision = 1
+                    while destination.exists():
+                        destination = base_dir / (
+                            f"{Path(name).stem}_{collision}"
+                            f"{Path(name).suffix}"
+                        )
+                        collision += 1
+                    destination.write_bytes(body)
+                    saved.append(str(destination))
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "Output media request failed for node %s (%d/3): %s",
+                        output.node_id, request_attempt, str(exc)[:160],
+                    )
+                    if request_attempt < 3:
+                        self._page.wait_for_timeout(1000 * request_attempt)
         return saved
 
     def _download_preview_batch(self, base_dir, output, actions):
@@ -2021,9 +2922,6 @@ class BrowserRunner:
         expanded preview with its ``x`` button.
         """
         node_id = output.node_id
-        # imageRects is populated by SaveImage's canvas draw routine. A node
-        # outside the viewport has no grid geometry yet, so render it first.
-        self._center_node_on_canvas(node_id)
         raw_count = self._comfy.evaluate(
             """(nodeId) => {
                 const node = app.graph.getNodeById(Number(nodeId));
@@ -2037,7 +2935,7 @@ class BrowserRunner:
                     Array.isArray(outputData.imgs) ? outputData.imgs.length : 0,
                     Array.isArray(outputData.images) ? outputData.images.length : 0,
                 ];
-                return Math.max(...counts, 1);
+                return Math.max(...counts, 0);
             }""",
             node_id,
         )
@@ -2049,7 +2947,8 @@ class BrowserRunner:
                 node_id, raw_count,
             )
             return None
-        if image_count <= 1:
+        if image_count <= 0:
+            logger.info("Output node %s has no preview images", node_id)
             return None
 
         logger.info(
@@ -2059,9 +2958,9 @@ class BrowserRunner:
         saved = []
         for image_index in range(image_count):
             last_error = None
-            for attempt in range(2):
+            for attempt in range(3):
                 try:
-                    with self._page.expect_download(timeout=30000) as dl:
+                    with self._page.expect_download(timeout=60000) as dl:
                         result = self._comfy.evaluate(
                             """({nodeId, actions, imageIndex}) => {
                                 const node = app.graph.getNodeById(Number(nodeId));
@@ -2160,7 +3059,7 @@ class BrowserRunner:
                         image_index + 1, image_count, attempt + 1,
                         str(exc)[:200],
                     )
-                    self._page.wait_for_timeout(1000)
+                    self._page.wait_for_timeout(1000 * (attempt + 1))
             if last_error is not None:
                 raise RuntimeError(
                     f"Output node {node_id} saved only {len(saved)}/{image_count} images"
@@ -2210,6 +3109,11 @@ class BrowserRunner:
                     {"actions": actions, "nodeId": node_id, "mediaType": output.media_type},
                 )
                 logger.info("Output save result for node %s: %s", node_id, result)
+                self._write_download_diagnostic({
+                    "stage": "context_menu_result",
+                    "node_id": node_id,
+                    "result": result,
+                })
 
             if not isinstance(result, dict) or result.get("state") != "invoked":
                 raise RuntimeError(result or "unknown_error")
@@ -2225,6 +3129,11 @@ class BrowserRunner:
                 result.get("label"), sp, sp.stat().st_size,
             )
         except Exception as exc:
+            self._write_download_diagnostic({
+                "stage": "context_menu_failed",
+                "node_id": node_id,
+                "error": str(exc)[:500],
+            })
             logger.warning("Configured output save failed: %s", str(exc)[:200])
 
         return saved
@@ -2322,6 +3231,7 @@ class BrowserRunner:
         # Validate all required logical inputs before opening a browser.
         self.workflow_spec.resolve_uploads(inputs)
         self.workflow_spec.resolve_texts(inputs)
+        target_node_ids = self._workflow_target_node_ids(inputs)
         self._raise_if_cancelled()
 
         try:
@@ -2331,11 +3241,14 @@ class BrowserRunner:
 
             # Dismiss any notice/announcement modals that block the UI
             self._page.wait_for_timeout(1000)
-            self._dismiss_popups()
-            self._page.wait_for_timeout(500)
+            self._dismiss_stale_completion_popup()
 
             with _upload_lock:
                 self._raise_if_cancelled()
+                self._report_progress(
+                    "positioning", "正在自动适配工作流操作节点"
+                )
+                self._fit_nodes_on_canvas(target_node_ids)
                 self.upload_inputs(inputs)
                 self.set_text_inputs(inputs)
             self._raise_if_cancelled()
@@ -2354,6 +3267,8 @@ class BrowserRunner:
                 self._dismiss_comfy_popups()
                 self._dismiss_popups()
                 self._page.wait_for_timeout(2000)
+
+            output_media_baseline = self._output_media_fingerprints()
 
             # ── Run with retry on OOM errors ──
             max_retries = 3
@@ -2446,27 +3361,50 @@ class BrowserRunner:
                     else:
                         queue_last_seen_at = None
                     previous_failure_seen_at = failure_first_seen_at
-                    failure_first_seen_at, failure_confirmed = (
-                        self._observe_task_failure(
-                            task_list_state,
-                            failure_first_seen_at,
-                            time.monotonic(),
+                    if (self.workflow_spec.completion.ignore_task_failure
+                            and task_state == "failed"):
+                        # Some workflows show "failed" in the task sidebar
+                        # while their requested image node is still usable.
+                        # For those workflows Show Report + output presence is
+                        # the only authoritative result.
+                        failure_first_seen_at = now_monotonic
+                        failure_confirmed = False
+                    else:
+                        failure_first_seen_at, failure_confirmed = (
+                            self._observe_task_failure(
+                                task_list_state,
+                                failure_first_seen_at,
+                                time.monotonic(),
+                            )
                         )
-                    )
                     if (failure_first_seen_at is not None
                             and previous_failure_seen_at is None):
                         logger.warning(
-                            "Task list shows failure; waiting %ds for an "
-                            "authoritative completion popup",
-                            self.TASK_FAILURE_GRACE_SECONDS,
+                            "Task list shows failure; waiting for an "
+                            "authoritative Show Report popup",
                         )
                         self._report_progress(
                             "running_workflow",
                             "检测到任务状态异常，正在确认工作流是否已经完成",
                         )
                     if failure_confirmed:
+                        current_output_media = self._output_media_fingerprints()
+                        if self._has_new_output_media(
+                                output_media_baseline, current_output_media):
+                            logger.warning(
+                                "Task list shows failure, but configured output "
+                                "node contains newly generated media; treating "
+                                "the requested output as complete",
+                            )
+                            status = "done"
+                            break
+                        dialog_text = self._visible_error_dialog_text()
+                        if dialog_text:
+                            raise RuntimeError(
+                                f"RunningHub 工作流执行失败：{dialog_text}"
+                            )
                         raise RuntimeError(
-                            "RunningHub 任务列表持续显示任务失败，且未检测到工作流完成"
+                            "RunningHub 任务列表持续显示任务失败，且目标输出节点没有新结果"
                         )
 
                     # Check for error popups
@@ -2490,6 +3428,14 @@ class BrowserRunner:
                             raise RuntimeError(
                                 "VHS_LoadVideo 视频处理失败 (ZeroDivisionError)，"
                                 "请检查视频文件是否损坏或格式不兼容"
+                            )
+                        if etype == "balance":
+                            raise RuntimeError(
+                                f"RunningHub/API 余额不足：{err.get('text', '')}"
+                            )
+                        if etype == "workflow_error":
+                            raise RuntimeError(
+                                f"RunningHub 工作流节点执行失败：{err.get('text', '')}"
                             )
                         # For other errors: just close, keep waiting
                         logger.info("Non-OOM error [%s] dismissed, continuing to wait",

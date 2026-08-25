@@ -21,6 +21,7 @@ def sample_config():
         "completion": {
             "markers": ["显示报告", "Show Report"],
             "minimum_run_seconds": 30,
+            "ignore_task_failure": True,
         },
         "strict_outputs": True,
     }
@@ -34,6 +35,7 @@ def test_builds_runtime_spec_from_server_payload():
     assert spec.texts[0].node_id == "20"
     assert spec.outputs[0].node_id == "30"
     assert spec.completion.minimum_run_seconds == 30
+    assert spec.completion.ignore_task_failure is True
     assert spec.strict_outputs is True
 
 

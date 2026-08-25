@@ -34,6 +34,7 @@ class CompletionSpec:
 
     markers: Sequence[str] = ("显示报告", "Show Report")
     minimum_run_seconds: int = 300
+    ignore_task_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,9 @@ def workflow_spec_from_dict(data: Mapping) -> WorkflowSpec:
         completion = CompletionSpec(
             markers=tuple(completion_data.get("markers") or ("显示报告", "Show Report")),
             minimum_run_seconds=int(completion_data.get("minimum_run_seconds", 300)),
+            ignore_task_failure=bool(
+                completion_data.get("ignore_task_failure", False)
+            ),
         )
         name = str(data["name"]).strip()
     except (KeyError, TypeError, ValueError) as exc:

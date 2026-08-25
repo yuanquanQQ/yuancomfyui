@@ -41,6 +41,7 @@ outputs/
 !client/static/client-logo.png
 !admin/web/admin-logo.png
 !installer/assets/*.png
+!installer/assets/client-data-notice.txt
 
 # Build artifacts
 build/

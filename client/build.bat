@@ -78,7 +78,7 @@ echo.
 echo   Usage:
 echo     1. Drop assets into the matching data\* subfolder
 echo     2. Double-click dist\yuncomfyui.exe
-echo     3. Browser opens at http://localhost:8080
+echo     3. Browser opens at the available local port shown at startup
 echo     4. Add account -> Login -> Submit task
 echo ============================================
 pause

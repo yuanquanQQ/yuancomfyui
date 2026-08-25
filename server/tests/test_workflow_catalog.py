@@ -11,6 +11,11 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
     assert by_key("person_replace")["spec"]["outputs"][0]["node_id"] == "119"
     assert by_key("scail_seven_outfit")["spec"]["outputs"][0]["node_id"] == "670"
     assert by_key("qwen_prompt_image")["spec"]["outputs"][0]["node_id"] == "161"
+    detail_restore = by_key("hd_restore_detail_v2")
+    assert detail_restore["name"] == "高定版高清修复【去AI感加细节】洗图"
+    assert detail_restore["primary_input"] == "source"
+    assert detail_restore["spec"]["uploads"][0]["node_id"] == "105"
+    assert detail_restore["spec"]["outputs"][0]["node_id"] == "149"
     assert by_key("krea2_realistic_4k")["spec"]["texts"][0]["node_id"] == "64"
     assert by_key("krea2_realistic_4k")["spec"]["outputs"][0]["node_id"] == "83"
     assert by_key("minimax_h3_dual_stage")["spec"]["uploads"][0]["node_id"] == "137"
@@ -30,6 +35,13 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
         "label": "分镜数量与要求", "required": True,
     }
     assert by_key("auto_storyboard_short_video")["spec"]["outputs"][0]["node_id"] == "114"
+    assert by_key("auto_storyboard_short_video")["spec"]["outputs"][0]["menu_actions"] == [
+        "save preview", "save image",
+    ]
+    assert (
+        by_key("auto_storyboard_short_video")["spec"]["outputs"][0]["menu_actions"]
+        == by_key("qwen_multi_view")["spec"]["outputs"][0]["menu_actions"]
+    )
     assert [item["node_id"] for item in by_key("firered_ecommerce_tryon")["spec"]["uploads"]] == ["207", "208"]
     assert by_key("firered_ecommerce_tryon")["inputs"][2]["input_type"] == "text"
     assert by_key("firered_ecommerce_tryon")["spec"]["texts"][0] == {
@@ -77,7 +89,7 @@ def test_catalog_post_mapping():
         "ltx23_hd_digital_human": "2089711917068804098",
         "minimax_h3_four_view": "2089783285118496770",
         "qwen_prompt_image": "2087933748502417409",
-        "hd_restore": "2087951445663510530",
+        "hd_restore_detail_v2": "2087951445663510530",
         "scail_seven_outfit": "2087947462567874561",
         "ootd_7day": "2087951298946752514",
         "minimax_h3_dual_stage": "2089228867037913090",
