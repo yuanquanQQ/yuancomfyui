@@ -37,10 +37,10 @@ echo   done.
 
 echo.
 echo ============================================
-echo   [3/4] PyInstaller packaging (1-2 min)...
+echo   [3/4] PyInstaller 6.14.2 + Inno Setup packaging...
 echo ============================================
 set PYTHONIOENCODING=utf-8
-"%APP_PYTHON%" -m PyInstaller yuncomfyui.spec --clean --noconfirm
+powershell -ExecutionPolicy Bypass -File "..\installer\build_installers.ps1" -ClientOnly
 if %ERRORLEVEL% NEQ 0 (
   echo.
   echo   *** PACKAGE FAILED ***
@@ -50,35 +50,13 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo ============================================
-echo   [4/4] Creating runtime directories...
+echo   [4/4] Installer ready...
 echo ============================================
-set "OUTDIR=dist"
-if not exist "%OUTDIR%\data\pic"     mkdir "%OUTDIR%\data\pic"
-if not exist "%OUTDIR%\data\ple"     mkdir "%OUTDIR%\data\ple"
-if not exist "%OUTDIR%\data\video"   mkdir "%OUTDIR%\data\video"
-if not exist "%OUTDIR%\profiles"     mkdir "%OUTDIR%\profiles"
-if not exist "%OUTDIR%\outputs"      mkdir "%OUTDIR%\outputs"
 echo   done.
 
 echo.
 echo ============================================
 echo   BUILD COMPLETE
-echo   Output: dist\yuncomfyui.exe
-echo.
-echo   Folder layout:
-echo     dist\
-echo     +-- yuncomfyui.exe     (main program, double-click to run)
-echo     +-- data\              (asset folders)
-echo     |   +-- pic\           (model images  *.png *.jpg)
-echo     |   +-- ple\           (clothing     *.png *.jpg)
-echo     |   +-- video\         (video clips  *.mp4)
-echo     +-- profiles\          (account config & session)
-echo     +-- outputs\           (generated results)
-echo.
-echo   Usage:
-echo     1. Drop assets into the matching data\* subfolder
-echo     2. Double-click dist\yuncomfyui.exe
-echo     3. Browser opens at the available local port shown at startup
-echo     4. Add account -> Login -> Submit task
+echo   Output: installer\output\YunComfyUI-Client-Setup.exe
 echo ============================================
 pause

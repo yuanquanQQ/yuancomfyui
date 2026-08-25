@@ -1,7 +1,7 @@
 """Declarative differences between RunningHub ComfyUI workflows."""
 
 from dataclasses import dataclass, field
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,30 @@ class TextInputSpec:
     widget: str
     label: str
     required: bool = True
+
+
+@dataclass(frozen=True)
+class WidgetInputSpec:
+    """Map one logical boolean input to a ComfyUI node widget."""
+
+    key: str
+    node_id: str
+    widget: str
+    label: str
+    true_value: Any = "yes"
+    false_value: Any = "no"
+    required: bool = True
+    default: Optional[bool] = None
+    interaction: str = "value"
+
+
+@dataclass(frozen=True)
+class NodeModeSpec:
+    """Set one ComfyUI node's fixed execution mode before running."""
+
+    node_id: str
+    mode: int
+    label: str
 
 
 @dataclass(frozen=True)
@@ -58,6 +82,8 @@ class WorkflowSpec:
     uploads: Sequence[UploadSpec]
     outputs: Sequence[OutputSpec]
     texts: Sequence[TextInputSpec] = ()
+    widgets: Sequence[WidgetInputSpec] = ()
+    node_modes: Sequence[NodeModeSpec] = ()
     completion: CompletionSpec = field(default_factory=CompletionSpec)
     strict_outputs: bool = False
 
@@ -89,12 +115,61 @@ class WorkflowSpec:
             resolved.append((text_input, value))
         return resolved
 
+    def resolve_widgets(self, inputs: Mapping[str, Any]):
+        resolved = []
+        for widget_input in self.widgets:
+            raw_value = inputs.get(widget_input.key, widget_input.default)
+            if raw_value is None:
+                if widget_input.required:
+                    raise ValueError(
+                        f"Workflow {self.name!r} requires input "
+                        f"{widget_input.key!r}"
+                    )
+                continue
+            if isinstance(raw_value, bool):
+                enabled = raw_value
+            elif isinstance(raw_value, (int, float)) and raw_value in (0, 1):
+                enabled = bool(raw_value)
+            elif isinstance(raw_value, str):
+                normalized = raw_value.strip().lower()
+                if normalized in {"true", "yes", "1", "on", "是"}:
+                    enabled = True
+                elif normalized in {"false", "no", "0", "off", "否"}:
+                    enabled = False
+                else:
+                    raise ValueError(
+                        f"Workflow {self.name!r} input "
+                        f"{widget_input.key!r} must be boolean"
+                    )
+            else:
+                raise ValueError(
+                    f"Workflow {self.name!r} input "
+                    f"{widget_input.key!r} must be boolean"
+                )
+            value = (
+                widget_input.true_value if enabled
+                else widget_input.false_value
+            )
+            resolved.append((widget_input, value))
+        return resolved
+
 
 def workflow_spec_from_dict(data: Mapping) -> WorkflowSpec:
     """Build the generic runner configuration returned by the license server."""
     try:
         uploads = tuple(UploadSpec(**item) for item in data.get("uploads", ()))
         texts = tuple(TextInputSpec(**item) for item in data.get("texts", ()))
+        widgets = tuple(
+            WidgetInputSpec(**item) for item in data.get("widgets", ())
+        )
+        node_modes = tuple(
+            NodeModeSpec(
+                node_id=str(item["node_id"]),
+                mode=int(item["mode"]),
+                label=str(item.get("label") or f"Node {item['node_id']}"),
+            )
+            for item in data.get("node_modes", ())
+        )
         outputs = tuple(
             OutputSpec(
                 node_id=str(item["node_id"]),
@@ -121,6 +196,8 @@ def workflow_spec_from_dict(data: Mapping) -> WorkflowSpec:
         uploads=uploads,
         outputs=outputs,
         texts=texts,
+        widgets=widgets,
+        node_modes=node_modes,
         completion=completion,
         strict_outputs=bool(data.get("strict_outputs", False)),
     )

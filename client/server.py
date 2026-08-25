@@ -38,10 +38,10 @@ logger = logging.getLogger("server")
 # Bundled assets live in PyInstaller's extraction directory. Installed builds
 # keep mutable state beside the executable so a portable/install-directory
 # deployment keeps license, profiles and user files on the selected drive.
+configured_data_root = os.environ.get("YUNCOMFYUI_DATA_DIR", "").strip()
 if getattr(sys, "frozen", False):
     BUNDLE_ROOT = Path(sys._MEIPASS)
     INSTALL_ROOT = Path(sys.executable).resolve().parent
-    configured_data_root = os.environ.get("YUNCOMFYUI_DATA_DIR", "").strip()
     if configured_data_root:
         APP_ROOT = Path(configured_data_root).expanduser().resolve()
     else:
@@ -52,7 +52,10 @@ if getattr(sys, "frozen", False):
 else:
     BUNDLE_ROOT = Path(__file__).resolve().parent
     INSTALL_ROOT = BUNDLE_ROOT
-    APP_ROOT = BUNDLE_ROOT
+    APP_ROOT = (
+        Path(configured_data_root).expanduser().resolve()
+        if configured_data_root else BUNDLE_ROOT
+    )
 
 
 def _migrate_legacy_install_data(legacy_root: Path, target_root: Path) -> None:
@@ -64,6 +67,31 @@ def _migrate_legacy_install_data(legacy_root: Path, target_root: Path) -> None:
             # Do not mark an unavailable old drive as migrated. Its registry
             # entry is retained and migration can resume if the drive returns.
             return
+        # A source-mode installer briefly used UserData without running the
+        # frozen-build migration. It may therefore have created a fresh,
+        # unactivated state before the older valid state was discovered. A
+        # valid signed receipt is more valuable than that empty state and must
+        # be recovered even when this source already has a migration marker.
+        source_license = legacy_root / ".license" / "license_state.json"
+        target_license = target_root / ".license" / "license_state.json"
+        try:
+            source_state = json.loads(source_license.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            source_state = {}
+        try:
+            target_state = json.loads(target_license.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            target_state = {}
+        source_has_license = bool(
+            source_state.get("receipt") and source_state.get("public_key_pem")
+        )
+        target_has_license = bool(
+            target_state.get("receipt") and target_state.get("public_key_pem")
+        )
+        if source_has_license and not target_has_license:
+            target_license.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_license, target_license)
+            logger.info("Recovered existing license state from %s", legacy_root)
         source_key = hashlib.sha256(
             str(legacy_root.resolve()).casefold().encode("utf-8")
         ).hexdigest()[:16]
@@ -821,24 +849,78 @@ def _resolve_uploaded_material(value: str | None, required=True) -> str | None:
     return str(path)
 
 
-def _resolve_workflow_inputs(workflow: dict, data: dict) -> dict[str, str]:
-    resolved = {}
-    for input_spec in workflow["inputs"]:
+def _parse_boolean(value, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on", "是"}:
+            return True
+        if normalized in {"false", "no", "0", "off", "否"}:
+            return False
+    raise ValueError(f"{label}必须是开关值")
+
+
+def _input_is_required(input_spec: dict, values: dict) -> bool:
+    condition = input_spec.get("required_when")
+    if isinstance(condition, dict) and condition.get("key"):
+        return _input_condition_met(input_spec, values)
+    return bool(input_spec.get("required", True))
+
+
+def _input_condition_met(input_spec: dict, values: dict) -> bool:
+    condition = input_spec.get("required_when")
+    if not isinstance(condition, dict) or not condition.get("key"):
+        return True
+    return values.get(condition["key"]) == condition.get("equals", True)
+
+
+def _resolve_workflow_inputs(workflow: dict, data: dict) -> dict[str, object]:
+    resolved: dict[str, object] = {}
+    input_specs = workflow["inputs"]
+
+    # Resolve switches first so conditional file requirements do not depend
+    # on the order in which fields happen to appear in the catalog.
+    for input_spec in input_specs:
+        if input_spec.get("input_type") != "boolean":
+            continue
         key = input_spec["key"]
+        label = input_spec.get("label", key)
+        raw_value = data.get(key, input_spec.get("default"))
+        if raw_value is None:
+            if _input_is_required(input_spec, resolved):
+                raise ValueError(f"缺少{label}")
+            continue
+        resolved[key] = _parse_boolean(raw_value, label)
+
+    for input_spec in input_specs:
+        key = input_spec["key"]
+        if input_spec.get("input_type") == "boolean":
+            continue
+        label = input_spec.get("label", key)
+        if not _input_condition_met(input_spec, resolved):
+            continue
+        required = _input_is_required(input_spec, resolved)
         if input_spec.get("input_type") == "text":
             value = str(data.get(key) or "").strip()
             if not value:
-                raise ValueError(f"缺少{input_spec['label']}")
+                if required:
+                    raise ValueError(f"缺少{label}")
+                continue
             resolved[key] = value
             continue
         try:
-            resolved[key] = _resolve_uploaded_material(data.get(key))
+            value = _resolve_uploaded_material(data.get(key), required=required)
         except ValueError as exc:
-            raise ValueError(f"{input_spec['label']}：{exc}") from exc
+            raise ValueError(f"{label}：{exc}") from exc
+        if value is not None:
+            resolved[key] = value
     return resolved
 
 
-def _resolve_batch_workflow_inputs(workflow: dict, data: dict) -> list[dict[str, str]]:
+def _resolve_batch_workflow_inputs(workflow: dict, data: dict) -> list[dict[str, object]]:
     raw_inputs = data.get("inputs")
     if not isinstance(raw_inputs, dict):
         raise ValueError("批量任务缺少 inputs")
@@ -847,28 +929,53 @@ def _resolve_batch_workflow_inputs(workflow: dict, data: dict) -> list[dict[str,
     if not 1 <= repeat <= 20:
         raise ValueError("每组生成次数必须在 1–20 之间")
 
-    resolved: dict[str, list[str]] = {}
+    resolved: dict[str, list[object | None]] = {}
     group_count = 1
-    for input_spec in workflow["inputs"]:
+    input_specs = workflow["inputs"]
+
+    for input_spec in input_specs:
+        if input_spec.get("input_type") != "boolean":
+            continue
         key = input_spec["key"]
+        label = input_spec.get("label", key)
         raw_values = raw_inputs.get(key)
+        if raw_values is None and "default" in input_spec:
+            raw_values = [input_spec["default"]]
         if not isinstance(raw_values, list):
-            raise ValueError(f"{input_spec['label']}必须是批量列表")
+            raise ValueError(f"{label}必须是批量列表")
+        if not raw_values:
+            raise ValueError(f"缺少{label}")
+        values = [_parse_boolean(value, label) for value in raw_values]
+        resolved[key] = values
+        group_count = max(group_count, len(values))
+
+    for input_spec in input_specs:
+        key = input_spec["key"]
+        if input_spec.get("input_type") == "boolean":
+            continue
+        label = input_spec.get("label", key)
+        raw_values = raw_inputs.get(key)
+        may_be_optional = (
+            not input_spec.get("required", True)
+            or bool(input_spec.get("required_when"))
+        )
+        if raw_values is None and may_be_optional:
+            raw_values = []
+        if not isinstance(raw_values, list):
+            raise ValueError(f"{label}必须是批量列表")
         values = [str(value or "").strip() for value in raw_values]
         values = [value for value in values if value]
-        if not values:
-            raise ValueError(f"缺少{input_spec['label']}")
 
         if input_spec.get("input_type") == "text":
-            resolved[key] = values
+            resolved[key] = values or [None]
         else:
             try:
-                resolved[key] = [
+                resolved[key] = ([
                     _resolve_uploaded_material(value) for value in values
-                ]
+                ] or [None])
             except ValueError as exc:
-                raise ValueError(f"{input_spec['label']}：{exc}") from exc
-        group_count = max(group_count, len(values))
+                raise ValueError(f"{label}：{exc}") from exc
+        group_count = max(group_count, len(resolved[key]))
 
     task_count = group_count * repeat
     if task_count > 500:
@@ -876,9 +983,20 @@ def _resolve_batch_workflow_inputs(workflow: dict, data: dict) -> list[dict[str,
 
     combinations = []
     for group_index in range(group_count):
-        group = {
+        candidate = {
             key: values[group_index % len(values)]
             for key, values in resolved.items()
+        }
+        for input_spec in input_specs:
+            key = input_spec["key"]
+            if _input_is_required(input_spec, candidate) and candidate.get(key) is None:
+                raise ValueError(f"缺少{input_spec.get('label', key)}")
+        group = {
+            key: value for key, value in candidate.items()
+            if value is not None and _input_condition_met(
+                next(spec for spec in input_specs if spec["key"] == key),
+                candidate,
+            )
         }
         for _ in range(repeat):
             combinations.append(dict(group))
@@ -887,7 +1005,7 @@ def _resolve_batch_workflow_inputs(workflow: dict, data: dict) -> list[dict[str,
 
 def _new_task(
     workflow: dict,
-    input_paths: dict[str, str],
+    input_paths: dict[str, object],
     requested_account: str,
     now: float | None = None,
 ) -> dict:
@@ -897,10 +1015,15 @@ def _new_task(
         item["key"]: item.get("input_type", "file")
         for item in workflow["inputs"]
     }
-    input_files = {
-        key: (value[:80] if input_types.get(key) == "text" else Path(value).name)
-        for key, value in input_paths.items()
-    }
+    input_files = {}
+    for key, value in input_paths.items():
+        input_type = input_types.get(key)
+        if input_type == "text":
+            input_files[key] = str(value)[:80]
+        elif input_type == "boolean":
+            input_files[key] = "开启" if value else "关闭"
+        else:
+            input_files[key] = Path(str(value)).name
     primary_key = workflow["primary_input"]
     task = {
         "task_id": task_id,

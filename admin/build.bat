@@ -12,9 +12,7 @@ if not exist "%APP_PYTHON%" (
   exit /b 1
 )
 
-"%APP_PYTHON%" -m pip install -r requirements.txt
+powershell -ExecutionPolicy Bypass -File "..\installer\build_installers.ps1" -AdminOnly
 if errorlevel 1 exit /b 1
-"%APP_PYTHON%" -m PyInstaller admin.spec --noconfirm --clean
-if errorlevel 1 exit /b 1
-echo Build complete: dist\YunComfyUI-License-Admin.exe
+echo Build complete: ..\installer\output\YunComfyUI-Admin-Setup.exe
 pause

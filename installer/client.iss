@@ -19,8 +19,10 @@ OutputDir=output
 OutputBaseFilename=YunComfyUI-Client-Setup
 SetupIconFile=assets\client-icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
-Compression=lzma2
-SolidCompression=yes
+; PyInstaller's one-file executable is already compressed. ZIP avoids a slow
+; second LZMA pass while keeping a normal Inno Setup installer.
+Compression=zip
+SolidCompression=no
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no

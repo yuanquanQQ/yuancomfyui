@@ -865,6 +865,161 @@ class BrowserRunner:
                 text_input.label, text_input.node_id, text_input.widget, len(value),
             )
 
+    def set_widget_inputs(self, inputs):
+        """Set configured boolean/value widgets before any file upload."""
+        for widget_input, value in self.workflow_spec.resolve_widgets(inputs):
+            self._report_progress(
+                "configuring", f"正在设置{widget_input.label}"
+            )
+            if widget_input.interaction == "rgthree_toggle":
+                result = self._comfy.evaluate(
+                    """async ({nodeId, widgetName, desired}) => {
+                        const node = app.graph.getNodeById(Number(nodeId));
+                        if (!node) return {state: 'node_not_found'};
+                        const widget = (node.widgets || []).find(
+                            item => item.name === widgetName
+                        );
+                        if (!widget) {
+                            return {state: 'widget_not_found', available:
+                                (node.widgets || []).map(item => item.name)};
+                        }
+                        const current = Boolean(
+                            widget.value && typeof widget.value === 'object'
+                                ? widget.value.toggled : widget.toggled
+                        );
+                        if (current === Boolean(desired)) {
+                            return {state: 'unchanged', current};
+                        }
+                        if (typeof widget.mouse !== 'function') {
+                            return {state: 'widget_not_clickable'};
+                        }
+                        // Click the circle immediately to the right of yes/no.
+                        // The custom widget owns this pointer handler; using it
+                        // avoids brittle DOM selectors for a canvas-only node.
+                        const height = Number(widget.computedHeight || 24);
+                        const y = Number(widget.y ?? widget.last_y ?? 26)
+                            + height / 2;
+                        const x = Number(node.size[0]) - 59;
+                        widget.mouse({type: 'pointerdown'}, [x, y], node);
+                        await new Promise(resolve => setTimeout(resolve, 80));
+                        const updated = Boolean(
+                            widget.value && typeof widget.value === 'object'
+                                ? widget.value.toggled : widget.toggled
+                        );
+                        app.graph.setDirtyCanvas(true, true);
+                        return {state: updated === Boolean(desired)
+                            ? 'updated' : 'toggle_not_applied',
+                            previous: current, current: updated};
+                    }""",
+                    {
+                        "nodeId": widget_input.node_id,
+                        "widgetName": widget_input.widget,
+                        "desired": bool(value),
+                    },
+                )
+                if result.get("state") not in {"updated", "unchanged"}:
+                    raise RuntimeError(
+                        f"Widget input node {widget_input.node_id} click failed: "
+                        f"{result}"
+                    )
+                logger.info(
+                    "Widget input %s -> node %s %s (current=%s)",
+                    widget_input.label, widget_input.node_id,
+                    "clicked" if result.get("state") == "updated"
+                    else "already matched",
+                    result.get("current"),
+                )
+                continue
+
+            result = self._comfy.evaluate(
+                """({nodeId, widgetName, value}) => {
+                    const node = app.graph.getNodeById(Number(nodeId));
+                    if (!node) return {state: 'node_not_found'};
+                    const widgets = node.widgets || [];
+                    const normalize = name => String(name || '')
+                        .trim().toLocaleLowerCase();
+                    let widget = widgets.find(item => item.name === widgetName);
+                    if (!widget) {
+                        const wanted = normalize(widgetName);
+                        widget = widgets.find(item => normalize(item.name) === wanted);
+                    }
+                    if (!widget) {
+                        return {
+                            state: 'widget_not_found',
+                            available: widgets.map(item => item.name),
+                        };
+                    }
+                    const previous = widget.value;
+                    widget.value = value;
+                    if (typeof widget.callback === 'function') {
+                        widget.callback(value, app.canvas, node);
+                    }
+                    if (node.onWidgetChanged) {
+                        node.onWidgetChanged(widget.name, value, previous, widget);
+                    }
+                    if (app.graph.afterChange) app.graph.afterChange();
+                    app.graph.setDirtyCanvas(true, true);
+                    return {
+                        state: 'updated', widget: widget.name,
+                        previous, value: widget.value,
+                    };
+                }""",
+                {
+                    "nodeId": widget_input.node_id,
+                    "widgetName": widget_input.widget,
+                    "value": value,
+                },
+            )
+            if result.get("state") != "updated":
+                raise RuntimeError(
+                    f"Widget input node {widget_input.node_id} update failed: "
+                    f"{result}"
+                )
+            logger.info(
+                "Widget input %s -> node %s widget %s = %r",
+                widget_input.label, widget_input.node_id,
+                result.get("widget") or widget_input.widget, value,
+            )
+
+    def set_node_modes(self):
+        """Apply fixed ComfyUI execution modes configured by the server."""
+        for node_mode in self.workflow_spec.node_modes:
+            self._report_progress(
+                "configuring", f"正在屏蔽{node_mode.label}"
+            )
+            result = self._comfy.evaluate(
+                """({nodeId, mode}) => {
+                    const node = app.graph.getNodeById(Number(nodeId));
+                    if (!node) return {state: 'node_not_found'};
+                    const previous = Number(node.mode ?? 0);
+                    if (typeof node.changeMode === 'function') {
+                        node.changeMode(mode);
+                    } else {
+                        node.mode = mode;
+                    }
+                    if (Number(node.mode) !== Number(mode)) {
+                        node.mode = mode;
+                    }
+                    if (app.graph.afterChange) app.graph.afterChange();
+                    app.graph.setDirtyCanvas(true, true);
+                    return {
+                        state: Number(node.mode) === Number(mode)
+                            ? 'updated' : 'mode_not_applied',
+                        previous, mode: Number(node.mode),
+                    };
+                }""",
+                {"nodeId": node_mode.node_id, "mode": node_mode.mode},
+            )
+            if result.get("state") != "updated":
+                raise RuntimeError(
+                    f"Node {node_mode.node_id} mode update failed: {result}"
+                )
+            logger.info(
+                "Node mode %s -> node %s = %d (previous=%s)",
+                node_mode.label, node_mode.node_id, node_mode.mode,
+                result.get("previous"),
+            )
+
     def upload_files(self, video_path, model_image_path, clothing_image_path=None):
         """Backward-compatible wrapper for the original workflow."""
         self.upload_inputs({
@@ -891,62 +1046,48 @@ class BrowserRunner:
         )
 
         # ---- Snapshot BEFORE ----
-        before = self._comfy.evaluate(
-            "(function(){"
-            "var n=app.graph.getNodeById(" + node_id + ");"
-            "var fw=n.widgets.find(function(w){return w.name=='" + file_widget + "';});"
-            "return{fileValue:fw?String(fw.value||'').slice(0,80):'N/A'};"
-            "})()"
-        )
+        before = self._read_upload_widget(node_id, file_widget)
         logger.info("  Before: %s", json.dumps(before, ensure_ascii=False))
 
-        # ---- Strategy A: trigger widget callback -> file chooser ----
-        try:
-            logger.info("  [A] Widget callback + file chooser...")
-            with self._page.expect_file_chooser(timeout=8000) as fc_info:
-                trigger_result = self._trigger_widget_upload(node_id, widget_name)
-            logger.info("  [A] Trigger: %s", json.dumps(trigger_result, ensure_ascii=False))
-            fc_info.value.set_files(file_path)
-            logger.info("  [A] File via chooser: %s", fp.name)
-            self._comfy.wait_for_timeout(3000)
-            self._dismiss_popups()
-
-        except Exception as exc:
-            logger.info("  [A] Failed (%s), trying B...", str(exc)[:80])
-            self._dismiss_popups()
+        # Videos can take much longer than the old fixed three-second wait.
+        # Upload them through the HTTP endpoint first so returning from this
+        # method means the server really received the complete file. The UI
+        # chooser remains a fallback for accounts where that endpoint changes.
+        direct_upload = None
+        if file_widget == "video":
             try:
-                logger.info("  [B] Widget callback + set_input_files...")
-                trigger_result = self._trigger_widget_upload(node_id, widget_name)
-                logger.info("  [B] Trigger: %s", json.dumps(trigger_result, ensure_ascii=False))
-                self._page.wait_for_timeout(1000)
-                for _ in range(12):
-                    self._dismiss_popups()
-                    self._page.wait_for_timeout(250)
-                used_selector = self._set_comfy_file_input(file_path)
-                logger.info("  [B] File set: %s via %s", fp.name, used_selector)
-                self._comfy.wait_for_timeout(3000)
-                self._dismiss_popups()
-                logger.info("  [B] OK")
-            except Exception as exc2:
-                logger.info("  [B] Failed (%s), trying C...", str(exc2)[:80])
+                logger.info("  [C] Verified direct video upload...")
+                direct_upload = self._upload_via_fetch_and_callback(
+                    node_id, widget_name, file_widget, file_path,
+                )
+                logger.info("  [C] Video upload confirmed: %s", direct_upload)
+            except Exception as direct_exc:
+                logger.warning(
+                    "  [C] Direct video upload failed (%s); using UI chooser",
+                    str(direct_exc)[:120],
+                )
+
+        if direct_upload is None:
+            try:
+                self._upload_via_ui_chooser(node_id, widget_name, file_path)
+            except Exception as ui_exc:
+                logger.info(
+                    "  UI upload failed (%s), trying verified direct upload...",
+                    str(ui_exc)[:120],
+                )
                 self._dismiss_popups()
                 try:
-                    logger.info("  [C] page.request + callback...")
-                    self._upload_via_fetch_and_callback(
-                        node_id, widget_name, file_widget, file_path)
-                    logger.info("  [C] OK")
-                except Exception as exc3:
-                    logger.error("  [C] Failed: %s", exc3)
-                    raise RuntimeError(f"All upload strategies failed for node {node_id}") from exc3
+                    direct_upload = self._upload_via_fetch_and_callback(
+                        node_id, widget_name, file_widget, file_path,
+                    )
+                except Exception as direct_exc:
+                    logger.error("  Direct upload failed: %s", direct_exc)
+                    raise RuntimeError(
+                        f"All upload strategies failed for node {node_id}"
+                    ) from direct_exc
 
         # ---- Verify ----
-        after = self._comfy.evaluate(
-            "(function(){"
-            "var n=app.graph.getNodeById(" + node_id + ");"
-            "var fw=n.widgets.find(function(w){return w.name=='" + file_widget + "';});"
-            "return{fileValue:fw?String(fw.value||'').slice(0,80):'N/A'};"
-            "})()"
-        )
+        after = self._read_upload_widget(node_id, file_widget)
         logger.info("  After: %s", json.dumps(after, ensure_ascii=False))
         old_v = before.get("fileValue", "")
         new_v = after.get("fileValue", "")
@@ -954,22 +1095,84 @@ class BrowserRunner:
         if new_v in invalid_values:
             raise RuntimeError(f"上传后节点 {node_id} 没有有效文件值")
         if old_v == new_v:
-            expected_name = Path(file_path).name
-            if expected_name not in new_v:
-                # ComfyUI renames uploaded files to hash-based names, so the
-                # local filename rarely appears in the widget value. When the
-                # value is already a valid hash-based filename from a previous
-                # upload, treat this as success instead of failing the task.
+            if direct_upload is None:
+                # Never silently accept an unchanged value. This was the cause
+                # of node 214 continuing to use its old video.
                 logger.warning(
-                    "  节点 %s 文件值未变化（%s），可能已是正确的文件，跳过",
-                    node_id, new_v[:80],
+                    "  Node %s value did not change after UI upload; forcing "
+                    "a verified direct upload", node_id,
                 )
-            else:
-                logger.info("  OK: repeated file confirmed: %s", new_v[:40])
+                direct_upload = self._upload_via_fetch_and_callback(
+                    node_id, widget_name, file_widget, file_path,
+                )
+                after = self._read_upload_widget(node_id, file_widget)
+                new_v = after.get("fileValue", "")
+            if direct_upload is None or new_v in invalid_values:
+                raise RuntimeError(f"上传后节点 {node_id} 文件值未更新")
+            logger.info(
+                "  OK: node value repeated but server upload was confirmed: %s",
+                new_v[:80],
+            )
         else:
             logger.info("  OK: %s -> %s", old_v[:40], new_v[:40])
 
         self._dismiss_popups()
+
+    def _read_upload_widget(self, node_id, file_widget):
+        """Read a node file widget without guessing that a missing value is OK."""
+        return self._comfy.evaluate(
+            """({nodeId, widgetName}) => {
+                const node = app.graph.getNodeById(Number(nodeId));
+                if (!node) return {state: 'node_not_found', fileValue: 'N/A'};
+                const normalize = value => String(value || '').trim().toLowerCase();
+                const widgets = node.widgets || [];
+                const widget = widgets.find(item => item.name === widgetName)
+                    || widgets.find(item => normalize(item.name) === normalize(widgetName));
+                if (!widget) return {
+                    state: 'widget_not_found', fileValue: 'N/A',
+                    available: widgets.map(item => item.name),
+                };
+                return {
+                    state: 'found', widget: widget.name,
+                    fileValue: String(widget.value || '').slice(0, 500),
+                };
+            }""",
+            {"nodeId": str(node_id), "widgetName": file_widget},
+        )
+
+    def _upload_via_ui_chooser(self, node_id, widget_name, file_path):
+        """Use ComfyUI's native upload chooser, with a DOM-input fallback."""
+        fp = Path(file_path)
+        try:
+            logger.info("  [A] Widget callback + file chooser...")
+            with self._page.expect_file_chooser(timeout=8000) as fc_info:
+                trigger_result = self._trigger_widget_upload(node_id, widget_name)
+            logger.info(
+                "  [A] Trigger: %s", json.dumps(trigger_result, ensure_ascii=False)
+            )
+            fc_info.value.set_files(file_path)
+            logger.info("  [A] File via chooser: %s", fp.name)
+            self._comfy.wait_for_timeout(3000)
+            self._dismiss_popups()
+            return
+        except Exception as exc:
+            logger.info("  [A] Failed (%s), trying B...", str(exc)[:80])
+            self._dismiss_popups()
+
+        logger.info("  [B] Widget callback + set_input_files...")
+        trigger_result = self._trigger_widget_upload(node_id, widget_name)
+        logger.info(
+            "  [B] Trigger: %s", json.dumps(trigger_result, ensure_ascii=False)
+        )
+        self._page.wait_for_timeout(1000)
+        for _ in range(12):
+            self._dismiss_popups()
+            self._page.wait_for_timeout(250)
+        used_selector = self._set_comfy_file_input(file_path)
+        logger.info("  [B] File set: %s via %s", fp.name, used_selector)
+        self._comfy.wait_for_timeout(3000)
+        self._dismiss_popups()
+        logger.info("  [B] OK")
 
     def _upload_via_fetch_and_callback(self, node_id, widget_name, file_widget,
                                        file_path):
@@ -1042,30 +1245,67 @@ class BrowserRunner:
 
         if isinstance(data, str):
             fname = data
+            subfolder = ""
         elif isinstance(data, dict):
             fname = data.get("name") or data.get("filename") or data.get("file") or ""
+            subfolder = str(data.get("subfolder") or "").strip("/\\")
         else:
             fname = ""
+            subfolder = ""
         if not fname:
             raise RuntimeError(f"No filename in response: {data}")
 
-        logger.info("  Uploaded filename: %s", fname)
+        widget_value = f"{subfolder}/{fname}" if subfolder else fname
 
-        # Call button widget's callback to update node state
+        logger.info("  Uploaded filename: %s", widget_value)
+
+        # Update the file widget itself. Calling the upload-button callback here
+        # can reopen a chooser without selecting anything, which is how node 214
+        # could retain the previous video despite a successful HTTP upload.
         cb_result = self._comfy.evaluate(
-            "(function(){"
-            "var node=app.graph.getNodeById(" + node_id + ");"
-            "var bw=node.widgets.find(function(w){return w.name=='" + widget_name + "';});"
-            "if(bw&&typeof bw.callback==='function'){bw.callback('" + fname + "');}"
-            "var fw=node.widgets.find(function(w){return w.name=='" + file_widget + "';});"
-            "if(fw){fw.value='" + fname + "';"
-            "if(fw.callback){try{fw.callback('" + fname + "');}catch(e){}}"
-            "}"
-            "if(window.app&&window.app.graph&&window.app.graph.afterChange){window.app.graph.afterChange();}"
-            "return{ok:true,filename:'" + fname + "'};"
-            "})()"
+            """({nodeId, widgetName, value}) => {
+                const node = app.graph.getNodeById(Number(nodeId));
+                if (!node) return {state: 'node_not_found'};
+                const normalize = item => String(item || '').trim().toLowerCase();
+                const widgets = node.widgets || [];
+                const widget = widgets.find(item => item.name === widgetName)
+                    || widgets.find(item => normalize(item.name) === normalize(widgetName));
+                if (!widget) return {
+                    state: 'widget_not_found',
+                    available: widgets.map(item => item.name),
+                };
+                const previous = widget.value;
+                widget.value = value;
+                if (typeof widget.callback === 'function') {
+                    widget.callback(value, app.canvas, node);
+                }
+                if (node.onWidgetChanged) {
+                    node.onWidgetChanged(widget.name, value, previous, widget);
+                }
+                if (app.graph.afterChange) app.graph.afterChange();
+                app.graph.setDirtyCanvas(true, true);
+                return {
+                    state: String(widget.value || '') === String(value)
+                        ? 'updated' : 'value_not_applied',
+                    widget: widget.name, previous,
+                    value: String(widget.value || ''),
+                };
+            }""",
+            {
+                "nodeId": str(node_id), "widgetName": file_widget,
+                "value": widget_value,
+            },
         )
         logger.info("  Callback: %s", json.dumps(cb_result, ensure_ascii=False))
+        if cb_result.get("state") != "updated":
+            raise RuntimeError(
+                f"Uploaded file could not be applied to node {node_id}: {cb_result}"
+            )
+        return {
+            "filename": widget_value,
+            "endpoint": endpoint,
+            "node_update": cb_result,
+        }
 
     # =================================================================
     # Precise Positioning
@@ -1081,6 +1321,10 @@ class BrowserRunner:
         node_ids.extend(
             text_input.node_id
             for text_input, _value in self.workflow_spec.resolve_texts(inputs)
+        )
+        node_ids.extend(
+            widget_input.node_id
+            for widget_input, _value in self.workflow_spec.resolve_widgets(inputs)
         )
         node_ids.extend(output.node_id for output in self.workflow_spec.outputs)
         return list(dict.fromkeys(str(node_id) for node_id in node_ids))
@@ -2156,11 +2400,110 @@ class BrowserRunner:
             pass
         return False
 
+    def _dismiss_cancel_popups(self):
+        """Click Cancel in every visible popup and keep watching for new ones.
+
+        The exact-text and popup-container checks are intentional: RunningHub's
+        task sidebar also contains a ``取消`` action, but it must only be used
+        by the explicit task-cancellation path.  This watcher is installed in
+        both the outer page and ComfyUI iframe, and its timer handles dialogs
+        that appear asynchronously between Python-side polling checkpoints.
+        """
+        script = r"""() => {
+            const visible = (el) => {
+                if (!el || !el.isConnected) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && Number(style.opacity || 1) > 0
+                    && rect.width > 0 && rect.height > 0;
+            };
+            const popupSelector = [
+                '[role="dialog"]', '[role="alertdialog"]',
+                '.ant-modal-content', '.ant-modal-wrap', '.ant-modal-confirm',
+                '.p-dialog', '.comfy-dialog', '.comfy-modal', '.lite-dialog',
+                '[class*="modal"]', '[class*="Modal"]',
+                '[class*="dialog"]', '[class*="Dialog"]',
+                '[class*="popup"]', '[class*="Popup"]',
+                '[class*="overlay"]', '[class*="Overlay"]'
+            ].join(',');
+            const popupFor = (button) => {
+                const semantic = button.closest(popupSelector);
+                if (semantic && visible(semantic)) return semantic;
+                // Some custom dialogs have no useful class. Accept a fixed
+                // full-screen/large overlay ancestor, but never a normal task
+                // card in the document flow.
+                let ancestor = button.parentElement;
+                for (let depth = 0; ancestor && depth < 10; depth++) {
+                    const style = window.getComputedStyle(ancestor);
+                    const rect = ancestor.getBoundingClientRect();
+                    if (visible(ancestor) && style.position === 'fixed'
+                            && rect.width >= Math.min(240, innerWidth * 0.25)
+                            && rect.height >= Math.min(100, innerHeight * 0.12)) {
+                        return ancestor;
+                    }
+                    ancestor = ancestor.parentElement;
+                }
+                return null;
+            };
+            const scan = () => {
+                let clicked = 0;
+                for (const candidate of document.querySelectorAll(
+                    'button, a, [role="button"], input[type="button"], input[type="submit"]'
+                )) {
+                    if (!visible(candidate) || candidate.disabled
+                            || candidate.dataset.yunCancelClicked === '1') continue;
+                    const text = ((candidate.innerText || candidate.textContent
+                        || candidate.value || '') + '').replace(/\s+/g, ' ').trim();
+                    if (!/^(取消|Cancel)$/i.test(text)) continue;
+                    const popup = popupFor(candidate);
+                    if (!popup) continue;
+                    candidate.dataset.yunCancelClicked = '1';
+                    candidate.click();
+                    clicked++;
+                }
+                return clicked;
+            };
+            const clicked = scan();
+            if (!window.__yunCancelPopupWatcher) {
+                const observer = new MutationObserver(scan);
+                observer.observe(document.documentElement || document.body, {
+                    childList: true, subtree: true, attributes: true,
+                    attributeFilter: ['class', 'style', 'hidden', 'open']
+                });
+                const timer = window.setInterval(scan, 250);
+                window.__yunCancelPopupWatcher = {observer, timer};
+            }
+            return {clicked, watching: true};
+        }"""
+        clicked = 0
+        scopes = (("main", self._page), ("comfy", self._comfy))
+        for scope, frame in scopes:
+            if not frame:
+                continue
+            try:
+                result = frame.evaluate(script)
+                count = int((result or {}).get("clicked") or 0)
+                clicked += count
+                if count:
+                    logger.info(
+                        "Dismissed %d popup(s) via Cancel (%s)", count, scope,
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Unable to install Cancel popup watcher in %s: %s",
+                    scope, str(exc)[:160],
+                )
+        if clicked:
+            self._page.wait_for_timeout(300)
+        return clicked
+
     def _dismiss_popups(self):
+        self._dismiss_cancel_popups()
         button_selectors = [
             'button:has-text("OK")', 'button:has-text("确定")',
             'button:has-text("Close")', 'button:has-text("关闭")',
-            'button:has-text("Cancel")', 'button:has-text("取消")',
             'button:has-text("Got it")', 'button:has-text("知道了")',
             'button:has-text("Confirm")', 'button:has-text("确认")',
             'button:has-text("Yes")', 'button:has-text("是")',
@@ -2360,6 +2703,7 @@ class BrowserRunner:
         if not self._comfy:
             return
         logger.info("Dismissing ComfyUI iframe popups...")
+        self._dismiss_cancel_popups()
 
         # ── Step 0: DIAGNOSTIC — snapshot visible elements in iframe ──
         self._diagnose_comfy_popups()
@@ -3231,6 +3575,7 @@ class BrowserRunner:
         # Validate all required logical inputs before opening a browser.
         self.workflow_spec.resolve_uploads(inputs)
         self.workflow_spec.resolve_texts(inputs)
+        self.workflow_spec.resolve_widgets(inputs)
         target_node_ids = self._workflow_target_node_ids(inputs)
         self._raise_if_cancelled()
 
@@ -3249,6 +3594,8 @@ class BrowserRunner:
                     "positioning", "正在自动适配工作流操作节点"
                 )
                 self._fit_nodes_on_canvas(target_node_ids)
+                self.set_node_modes()
+                self.set_widget_inputs(inputs)
                 self.upload_inputs(inputs)
                 self.set_text_inputs(inputs)
             self._raise_if_cancelled()
@@ -3315,6 +3662,7 @@ class BrowserRunner:
                 last_task_state = None
                 while time.monotonic() < deadline or last_task_state == "queued":
                     self._raise_if_cancelled()
+                    self._dismiss_cancel_popups()
                     elapsed = time.monotonic() - execution_started_at
                     if int(elapsed) % 30 < poll_interval:
                         detail = (

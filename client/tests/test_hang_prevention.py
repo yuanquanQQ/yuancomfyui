@@ -455,7 +455,9 @@ class BrowserUploadTests(unittest.TestCase):
         response.text.return_value = '"uploaded.png"'
         response.json.return_value = "uploaded.png"
         runner._page.request.post.return_value = response
-        runner._comfy.evaluate.return_value = {"ok": True}
+        runner._comfy.evaluate.return_value = {
+            "state": "updated", "widget": "image", "value": "uploaded.png",
+        }
 
         with tempfile.TemporaryDirectory() as directory:
             file_path = Path(directory) / "source.png"
@@ -464,8 +466,58 @@ class BrowserUploadTests(unittest.TestCase):
                 "1116", "upload", "image", str(file_path),
             )
 
-        script = runner._comfy.evaluate.call_args.args[0]
-        self.assertIn("uploaded.png", script)
+        payload = runner._comfy.evaluate.call_args.args[1]
+        self.assertEqual("uploaded.png", payload["value"])
+        self.assertEqual("image", payload["widgetName"])
+
+    def test_video_upload_prefers_verified_direct_transfer(self):
+        runner = BrowserRunner.__new__(BrowserRunner)
+        runner._page = mock.MagicMock()
+        runner._comfy = mock.MagicMock()
+        runner._dismiss_popups = mock.Mock()
+        runner._upload_via_fetch_and_callback = mock.Mock(return_value={
+            "filename": "new-video.mp4", "endpoint": "/upload/video",
+        })
+        runner._upload_via_ui_chooser = mock.Mock()
+        runner._read_upload_widget = mock.Mock(side_effect=[
+            {"state": "found", "fileValue": "old-video.mp4"},
+            {"state": "found", "fileValue": "new-video.mp4"},
+        ])
+
+        with tempfile.TemporaryDirectory() as directory:
+            file_path = Path(directory) / "new-video.mp4"
+            file_path.write_bytes(b"video")
+            runner._upload_one(
+                "214", "choose video to upload", str(file_path),
+                file_widget="video",
+            )
+
+        runner._upload_via_fetch_and_callback.assert_called_once()
+        runner._upload_via_ui_chooser.assert_not_called()
+
+    def test_unchanged_ui_upload_forces_verified_direct_transfer(self):
+        runner = BrowserRunner.__new__(BrowserRunner)
+        runner._page = mock.MagicMock()
+        runner._comfy = mock.MagicMock()
+        runner._dismiss_popups = mock.Mock()
+        runner._upload_via_ui_chooser = mock.Mock()
+        runner._upload_via_fetch_and_callback = mock.Mock(return_value={
+            "filename": "confirmed.png", "endpoint": "/upload/image",
+        })
+        runner._read_upload_widget = mock.Mock(side_effect=[
+            {"state": "found", "fileValue": "old.png"},
+            {"state": "found", "fileValue": "old.png"},
+            {"state": "found", "fileValue": "confirmed.png"},
+        ])
+
+        with tempfile.TemporaryDirectory() as directory:
+            file_path = Path(directory) / "new.png"
+            file_path.write_bytes(b"image")
+            runner._upload_one(
+                "42", "choose file", str(file_path), file_widget="image",
+            )
+
+        runner._upload_via_fetch_and_callback.assert_called_once()
 
 
 class LoginSessionTests(unittest.TestCase):

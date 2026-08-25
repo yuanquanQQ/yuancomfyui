@@ -1,6 +1,7 @@
 # Windows installers
 
-The two Inno Setup projects create separate 64-bit Windows installers:
+PyInstaller 6.14.2 builds the application executables, then Inno Setup 6.7.3
+creates the two 64-bit Windows installers:
 
 - `YunComfyUI-Client-Setup.exe`
 - `YunComfyUI-Admin-Setup.exe`
@@ -23,7 +24,9 @@ The SVG source marks in `installer/assets` are rendered automatically. Then run:
 powershell -ExecutionPolicy Bypass -File installer/build_installers.ps1
 ```
 
-Use `-SkipApplicationBuild` to compile only the installers from existing EXEs.
+Use `-ClientOnly` or `-AdminOnly` to build just one installer. Use
+`-SkipApplicationBuild` only when the corresponding executable already exists
+under `client/dist` or `admin/dist`.
 
 Generated installers are written to `installer/output`. Both installers use a
 Chinese wizard, support a custom destination drive and directory, create an

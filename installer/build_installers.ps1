@@ -1,4 +1,6 @@
 param(
+    [switch] $ClientOnly,
+    [switch] $AdminOnly,
     [switch] $SkipApplicationBuild
 )
 
@@ -16,6 +18,10 @@ $isccCandidates = @(
     "C:\Program Files\Inno Setup 6\ISCC.exe"
 )
 $iscc = $isccCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+
+if ($ClientOnly -and $AdminOnly) {
+    throw "ClientOnly and AdminOnly cannot be used together."
+}
 
 if (-not $iscc) {
     throw "Inno Setup 6 is required. Install package JRSoftware.InnoSetup first."
@@ -40,26 +46,38 @@ foreach ($icon in $requiredIcons) {
 }
 
 if (-not $SkipApplicationBuild) {
-    Push-Location (Join-Path $repoRoot "client")
-    try {
-        & $python -m PyInstaller yuncomfyui.spec --clean --noconfirm
-        if ($LASTEXITCODE -ne 0) { throw "Client packaging failed." }
-    } finally {
-        Pop-Location
+    if (-not $AdminOnly) {
+        & $python -m pip install -r (Join-Path $repoRoot "client\requirements.txt")
+        if ($LASTEXITCODE -ne 0) { throw "Client build dependency installation failed." }
+        Push-Location (Join-Path $repoRoot "client")
+        try {
+            & $python -m PyInstaller yuncomfyui.spec --clean --noconfirm
+            if ($LASTEXITCODE -ne 0) { throw "Client packaging failed." }
+        } finally {
+            Pop-Location
+        }
     }
 
-    Push-Location (Join-Path $repoRoot "admin")
-    try {
-        & $python -m PyInstaller admin.spec --clean --noconfirm
-        if ($LASTEXITCODE -ne 0) { throw "Admin packaging failed." }
-    } finally {
-        Pop-Location
+    if (-not $ClientOnly) {
+        & $python -m pip install -r (Join-Path $repoRoot "admin\requirements.txt")
+        if ($LASTEXITCODE -ne 0) { throw "Admin build dependency installation failed." }
+        Push-Location (Join-Path $repoRoot "admin")
+        try {
+            & $python -m PyInstaller admin.spec --clean --noconfirm
+            if ($LASTEXITCODE -ne 0) { throw "Admin packaging failed." }
+        } finally {
+            Pop-Location
+        }
     }
 }
 
-& $iscc (Join-Path $installerRoot "client.iss")
-if ($LASTEXITCODE -ne 0) { throw "Client installer build failed." }
-& $iscc (Join-Path $installerRoot "admin.iss")
-if ($LASTEXITCODE -ne 0) { throw "Admin installer build failed." }
+if (-not $AdminOnly) {
+    & $iscc (Join-Path $installerRoot "client.iss")
+    if ($LASTEXITCODE -ne 0) { throw "Client installer build failed." }
+}
+if (-not $ClientOnly) {
+    & $iscc (Join-Path $installerRoot "admin.iss")
+    if ($LASTEXITCODE -ne 0) { throw "Admin installer build failed." }
+}
 
 Write-Host "Installers are ready in: $(Join-Path $installerRoot 'output')"

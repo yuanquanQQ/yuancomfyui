@@ -48,6 +48,7 @@ build/
 dist/
 release/
 installer/output/
+installer/stage/
 *.spec.bak
 *.log
 

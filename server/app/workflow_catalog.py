@@ -21,15 +21,23 @@ def output(node_id, media_type, *menu_actions):
     }
 
 
-def input_field(key, label, media_type="image", input_type=None):
+def input_field(key, label, media_type="image", input_type=None, *,
+                required=True, default=None, required_when=None):
     item = {"key": key, "label": label, "media_type": media_type}
     if input_type:
         item["input_type"] = input_type
+    if not required:
+        item["required"] = False
+    if default is not None:
+        item["default"] = default
+    if required_when:
+        item["required_when"] = required_when
     return item
 
 
 def workflow(key, name, description, category, post_id, primary_input,
-             inputs, uploads, outputs, *, texts=None, timeout=3000,
+             inputs, uploads, outputs, *, texts=None, widgets=None,
+             node_modes=None, timeout=3000,
              minimum_run_seconds=300, ignore_task_failure=False):
     return {
         "key": key,
@@ -44,6 +52,8 @@ def workflow(key, name, description, category, post_id, primary_input,
             "name": key,
             "uploads": uploads,
             "texts": texts or [],
+            "widgets": widgets or [],
+            "node_modes": node_modes or [],
             "outputs": outputs,
             "completion": {
                 "markers": ["显示报告", "Show Report"],
@@ -59,9 +69,33 @@ WORKFLOW_CATALOG = [
     workflow(
         "person_replace", "人物替换", "使用替换背景、参考人物与动作视频生成",
         "video", "2087949278193995777", "model",
-        [input_field("background", "替换背景图"), input_field("video", "动作视频", "video"), input_field("model", "人物参考图")],
-        [upload("background", 247, "替换背景图"), upload("model", 108, "人物参考图"), upload("video", 112, "动作视频", "video", "choose video to upload")],
+        [
+            input_field(
+                "upload_background", "上传替换背景", input_type="boolean",
+                default=True,
+            ),
+            input_field(
+                "background", "替换背景图", required=False,
+                required_when={"key": "upload_background", "equals": True},
+            ),
+            input_field("video", "动作视频", "video"),
+            input_field("model", "人物参考图"),
+        ],
+        [
+            upload("background", 247, "替换背景图", required=False),
+            upload("model", 108, "人物参考图"),
+            upload(
+                "video", 112, "动作视频", "video", "choose video to upload"
+            ),
+        ],
         [output(119, "video", "save video", "save preview")],
+        widgets=[{
+            "key": "upload_background", "node_id": "250",
+            "widget": "RGTHREE_TOGGLE_AND_NAV", "label": "上传替换背景",
+            "true_value": True, "false_value": False, "required": True,
+            "default": True,
+            "interaction": "rgthree_toggle",
+        }],
     ),
     workflow(
         "ootd_7day", "OOTD 7天变装", "7 张穿搭图片生成并合成长视频",
@@ -98,11 +132,36 @@ WORKFLOW_CATALOG = [
         [output(149, "image", "save image", "save preview")], minimum_run_seconds=30,
     ),
     workflow(
-        "scail_multi_reference", "极境 SCAIL2 动作迁移（多参考）", "使用动作视频和 6 张人物参考图生成动作迁移视频",
+        "scail_multi_reference", "极境 SCAIL2 动作迁移（多参考）",
+        "使用动作视频和 2 张人物参考图生成动作迁移视频",
         "video", "2087945522677108738", "reference1",
-        [input_field("motion_video", "动作视频", "video"), *[input_field(f"reference{i}", f"参考图 {i}") for i in range(1, 7)]],
-        [upload("motion_video", 214, "动作视频", "video", "choose video to upload"), *[upload(f"reference{i}", node, f"参考图 {i}") for i, node in enumerate((1166, 1244, 1336, 1337, 1338, 1339), 1)]],
-        [output(161, "video", "save video", "save preview")], timeout=7200,
+        [
+            input_field("motion_video", "动作视频", "video"),
+            input_field("reference1", "参考图 1"),
+            input_field("reference2", "参考图 2"),
+        ],
+        [
+            upload(
+                "motion_video", 214, "动作视频", "video",
+                "choose video to upload",
+            ),
+            upload("reference1", 1166, "参考图 1"),
+            upload("reference2", 1244, "参考图 2"),
+        ],
+        [output(161, "video", "save video", "save preview")],
+        node_modes=[
+            *[
+                {"node_id": str(node_id), "mode": 2,
+                 "label": f"参考图节点 {node_id}"}
+                for node_id in (1336, 1337, 1338, 1339)
+            ],
+            *[
+                {"node_id": str(node_id), "mode": 4,
+                 "label": f"图片拼接节点 {node_id}"}
+                for node_id in (1340, 1341, 1342, 1343)
+            ],
+        ],
+        timeout=7200,
     ),
     workflow(
         "scail_seven_outfit", "SCAIL 2 七段贴图换装", "使用动作视频和 7 张服装贴图生成七段换装视频",

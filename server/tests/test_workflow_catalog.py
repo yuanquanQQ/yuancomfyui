@@ -9,7 +9,43 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
     assert DEFAULT_WORKFLOW_KEY == "person_replace"
     assert by_key("person_replace")["post_id"] == "2087949278193995777"
     assert by_key("person_replace")["spec"]["outputs"][0]["node_id"] == "119"
+    person_replace = by_key("person_replace")
+    assert person_replace["inputs"][0] == {
+        "key": "upload_background", "label": "上传替换背景",
+        "media_type": "image", "input_type": "boolean", "default": True,
+    }
+    assert person_replace["inputs"][1]["required"] is False
+    assert person_replace["inputs"][1]["required_when"] == {
+        "key": "upload_background", "equals": True,
+    }
+    assert person_replace["spec"]["uploads"][0]["required"] is False
+    assert person_replace["spec"]["widgets"][0] == {
+        "key": "upload_background", "node_id": "250",
+        "widget": "RGTHREE_TOGGLE_AND_NAV", "label": "上传替换背景",
+        "true_value": True, "false_value": False, "required": True,
+        "default": True,
+        "interaction": "rgthree_toggle",
+    }
     assert by_key("scail_seven_outfit")["spec"]["outputs"][0]["node_id"] == "670"
+    scail_multi = by_key("scail_multi_reference")
+    assert [item["key"] for item in scail_multi["inputs"]] == [
+        "motion_video", "reference1", "reference2",
+    ]
+    assert [item["node_id"] for item in scail_multi["spec"]["uploads"]] == [
+        "214", "1166", "1244",
+    ]
+    assert scail_multi["spec"]["node_modes"] == [
+        *[
+            {"node_id": str(node_id), "mode": 2,
+             "label": f"参考图节点 {node_id}"}
+            for node_id in (1336, 1337, 1338, 1339)
+        ],
+        *[
+            {"node_id": str(node_id), "mode": 4,
+             "label": f"图片拼接节点 {node_id}"}
+            for node_id in (1340, 1341, 1342, 1343)
+        ],
+    ]
     assert by_key("qwen_prompt_image")["spec"]["outputs"][0]["node_id"] == "161"
     detail_restore = by_key("hd_restore_detail_v2")
     assert detail_restore["name"] == "高定版高清修复【去AI感加细节】洗图"

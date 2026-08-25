@@ -6,8 +6,10 @@ from unittest import mock
 from runninghub_client.browser import BrowserRunner
 from runninghub_client.workflow_specs import (
     OutputSpec,
+    NodeModeSpec,
     TextInputSpec,
     UploadSpec,
+    WidgetInputSpec,
     WorkflowSpec,
 )
 
@@ -172,6 +174,66 @@ class BrowserPostTests(unittest.TestCase):
         self.assertEqual({"149": ["https://example/output.png"]}, result)
         self.assertEqual(["149"], comfy.evaluate.call_args.args[1])
 
+    def test_boolean_widget_is_set_on_configured_node(self):
+        self.runner.workflow_spec = WorkflowSpec(
+            name="person_replace",
+            uploads=(),
+            outputs=(OutputSpec("119", media_type="video"),),
+            widgets=(WidgetInputSpec(
+                "upload_background", "250", "RGTHREE_TOGGLE_AND_NAV",
+                "上传替换背景", True, False, True, True, "rgthree_toggle",
+            ),),
+        )
+        comfy = mock.MagicMock()
+        comfy.evaluate.return_value = {
+            "state": "updated", "previous": True, "current": False,
+        }
+        self.runner._comfy = comfy
+
+        self.runner.set_widget_inputs({"upload_background": False})
+
+        payload = comfy.evaluate.call_args.args[1]
+        self.assertEqual("250", payload["nodeId"])
+        self.assertEqual("RGTHREE_TOGGLE_AND_NAV", payload["widgetName"])
+        self.assertFalse(payload["desired"])
+
+    def test_matching_rgthree_toggle_is_not_clicked(self):
+        self.runner.workflow_spec = WorkflowSpec(
+            name="person_replace", uploads=(),
+            outputs=(OutputSpec("119", media_type="video"),),
+            widgets=(WidgetInputSpec(
+                "upload_background", "250", "RGTHREE_TOGGLE_AND_NAV",
+                "上传替换背景", True, False, True, True, "rgthree_toggle",
+            ),),
+        )
+        comfy = mock.MagicMock()
+        comfy.evaluate.return_value = {"state": "unchanged", "current": True}
+        self.runner._comfy = comfy
+
+        self.runner.set_widget_inputs({"upload_background": True})
+
+        self.assertTrue(comfy.evaluate.call_args.args[1]["desired"])
+
+    def test_fixed_node_mode_is_applied_without_canvas_clicking(self):
+        self.runner.workflow_spec = WorkflowSpec(
+            name="scail_multi_reference",
+            uploads=(),
+            outputs=(OutputSpec("161", media_type="video"),),
+            node_modes=(NodeModeSpec("1336", 2, "参考图节点 1336"),),
+        )
+        comfy = mock.MagicMock()
+        comfy.evaluate.return_value = {
+            "state": "updated", "previous": 0, "mode": 2,
+        }
+        self.runner._comfy = comfy
+
+        self.runner.set_node_modes()
+
+        self.assertEqual(
+            {"nodeId": "1336", "mode": 2},
+            comfy.evaluate.call_args.args[1],
+        )
+
     def test_new_output_media_ignores_preexisting_preview(self):
         baseline = {"149": ["old.png"]}
 
@@ -229,6 +291,39 @@ class BrowserPostTests(unittest.TestCase):
             "active_cancel_not_found",
             self.runner._cloud_cancel_result["reason"],
         )
+
+    def test_popup_cancel_watcher_covers_page_and_iframe(self):
+        self.runner._dismiss_popups = BrowserRunner._dismiss_popups.__get__(
+            self.runner, BrowserRunner
+        )
+        self.runner._comfy = mock.MagicMock()
+        self.page.evaluate.return_value = {"clicked": 1, "watching": True}
+        self.runner._comfy.evaluate.return_value = {
+            "clicked": 2, "watching": True,
+        }
+
+        clicked = self.runner._dismiss_cancel_popups()
+
+        self.assertEqual(3, clicked)
+        self.page.evaluate.assert_called_once()
+        self.runner._comfy.evaluate.assert_called_once()
+        script = self.page.evaluate.call_args.args[0]
+        self.assertIn("/^(取消|Cancel)$/i", script)
+        self.assertIn("button.closest(popupSelector)", script)
+        self.assertIn("setInterval(scan, 250)", script)
+
+    def test_generic_popup_dismissal_no_longer_clicks_global_cancel(self):
+        self.runner._dismiss_popups = BrowserRunner._dismiss_popups.__get__(
+            self.runner, BrowserRunner
+        )
+        self.runner._dismiss_cancel_popups = mock.MagicMock(return_value=0)
+        self.runner._comfy = None
+
+        self.runner._dismiss_popups()
+
+        selectors = [call.args[0] for call in self.page.locator.call_args_list]
+        self.assertNotIn('button:has-text("取消")', selectors)
+        self.assertNotIn('button:has-text("Cancel")', selectors)
 
     def test_stale_show_report_popup_is_dismissed_before_setup(self):
         self.runner._dismiss_comfy_popups = mock.MagicMock()

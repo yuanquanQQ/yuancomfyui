@@ -49,4 +49,4 @@ admin/build.bat
 - `dist/yuncomfyui.exe`
 - `admin/dist/YunComfyUI-License-Admin.exe`
 
-PyInstaller 打包和 DPAPI 令牌加密用于提高普通复制传播的门槛，但不能承诺软件绝对无法被逆向破解。
+安装包与 DPAPI 令牌加密用于提高普通复制传播的门槛，但不能承诺软件绝对无法被逆向破解。

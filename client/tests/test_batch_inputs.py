@@ -1,4 +1,5 @@
 import server
+import pytest
 
 
 def test_batch_inputs_pair_and_repeat_text_workflow():
@@ -45,3 +46,56 @@ def test_batch_inputs_cycle_shorter_file_input():
     assert len(groups) == 2
     assert all(group["background"].endswith("78203beb850680946d2172f8b3cd9b68.png") for group in groups)
     assert all(group["video"].endswith("d30fee59d6c58c8e51c10c65e91ec703.mp4") for group in groups)
+
+
+def person_replace_inputs():
+    return (
+        {"key": "upload_background", "label": "上传替换背景",
+         "input_type": "boolean", "default": True},
+        {"key": "background", "label": "替换背景图", "required": False,
+         "required_when": {"key": "upload_background", "equals": True}},
+        {"key": "model", "label": "人物参考图"},
+    )
+
+
+def test_optional_background_is_skipped_when_switch_is_off():
+    model = "data/pic/8baed76edd10056ba355fbe2bdacf963.png"
+    background = "data/pic/78203beb850680946d2172f8b3cd9b68.png"
+    workflow = {"name": "人物替换", "inputs": person_replace_inputs()}
+
+    single = server._resolve_workflow_inputs(
+        workflow, {
+            "upload_background": False, "background": background,
+            "model": model,
+        },
+    )
+    batch = server._resolve_batch_workflow_inputs(
+        workflow,
+        {"inputs": {
+            "upload_background": [False], "background": [background],
+            "model": [model],
+        }},
+    )
+
+    assert single["upload_background"] is False
+    assert "background" not in single
+    assert batch[0]["upload_background"] is False
+    assert "background" not in batch[0]
+
+
+def test_background_is_required_when_switch_is_on():
+    model = "data/pic/8baed76edd10056ba355fbe2bdacf963.png"
+    workflow = {"name": "人物替换", "inputs": person_replace_inputs()}
+
+    with pytest.raises(ValueError, match="替换背景图"):
+        server._resolve_workflow_inputs(
+            workflow, {"upload_background": True, "model": model},
+        )
+    with pytest.raises(ValueError, match="替换背景图"):
+        server._resolve_batch_workflow_inputs(
+            workflow,
+            {"inputs": {
+                "upload_background": [True], "background": [],
+                "model": [model],
+            }},
+        )

@@ -4,3 +4,4 @@ tqdm>=4.66.0
 python-dotenv>=1.0.0
 playwright>=1.40.0
 pywebview==5.4
+pyinstaller==6.14.2

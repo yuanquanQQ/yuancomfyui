@@ -14,6 +14,16 @@ def sample_config():
             "key": "prompt", "node_id": "20", "widget": "text",
             "label": "提示词", "required": True,
         }],
+        "widgets": [{
+            "key": "upload_background", "node_id": "250",
+            "widget": "RGTHREE_TOGGLE_AND_NAV", "label": "上传替换背景",
+            "true_value": True, "false_value": False, "required": True,
+            "default": True,
+            "interaction": "rgthree_toggle",
+        }],
+        "node_modes": [{
+            "node_id": "1336", "mode": 2, "label": "参考图节点 1336",
+        }],
         "outputs": [{
             "node_id": "30", "menu_actions": ["save image"],
             "media_type": "image",
@@ -33,6 +43,9 @@ def test_builds_runtime_spec_from_server_payload():
     assert spec.name == "remote_workflow"
     assert spec.uploads[0].node_id == "10"
     assert spec.texts[0].node_id == "20"
+    assert spec.widgets[0].node_id == "250"
+    assert spec.node_modes[0].node_id == "1336"
+    assert spec.node_modes[0].mode == 2
     assert spec.outputs[0].node_id == "30"
     assert spec.completion.minimum_run_seconds == 30
     assert spec.completion.ignore_task_failure is True
@@ -54,3 +67,13 @@ def test_rejects_server_spec_without_output():
 
     with pytest.raises(ValueError, match="不完整"):
         workflow_spec_from_dict(config)
+
+
+def test_boolean_widget_values_are_mapped_for_comfyui():
+    spec = workflow_spec_from_dict(sample_config())
+
+    assert spec.resolve_widgets({"upload_background": True})[0][1] is True
+    assert spec.resolve_widgets({"upload_background": "no"})[0][1] is False
+    assert spec.resolve_widgets({})[0][1] is True
+    with pytest.raises(ValueError, match="must be boolean"):
+        spec.resolve_widgets({"upload_background": "sometimes"})

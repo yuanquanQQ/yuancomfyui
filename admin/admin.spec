@@ -1,11 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 a = Analysis(
-    ['app.py'],
+    ["app.py"],
     pathex=[],
     binaries=[],
-    datas=[('web', 'web')],
-    hiddenimports=['webview.platforms.edgechromium'],
+    datas=[("web", "web")],
+    hiddenimports=["webview.platforms.edgechromium"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -20,11 +20,11 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='YunComfyUI-License-Admin',
+    name="YunComfyUI-License-Admin",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     console=False,
-    icon=str((SPECPATH + '/../installer/assets/admin-icon.ico')),
+    icon=str(SPECPATH + "/../installer/assets/admin-icon.ico"),
 )
