@@ -100,9 +100,33 @@ WORKFLOW_CATALOG = [
     workflow(
         "ootd_7day", "OOTD 7天变装", "7 张穿搭图片生成并合成长视频",
         "video", "2087951298946752514", "day1",
-        [*[input_field(f"day{day}", f"第 {day} 天图片") for day in range(1, 8)], input_field("audio", "背景音乐", "audio")],
+        [
+            *[
+                field
+                for day in range(1, 8)
+                for field in (
+                    input_field(f"day{day}", f"第 {day} 天图片"),
+                    input_field(
+                        f"prompt{day}", f"第 {day} 天动作提示词",
+                        "text", "text",
+                    ),
+                )
+            ],
+            input_field("audio", "背景音乐", "audio"),
+        ],
         [*[upload(f"day{day}", node, f"第 {day} 天图片") for day, node in enumerate((6557, 6798, 6851, 7110, 7170, 7786, 7852), 1)], upload("audio", 6726, "背景音乐", "audio")],
-        [output(6223, "video", "save video", "save preview")], timeout=7200,
+        [output(6223, "video", "save video", "save preview")],
+        texts=[
+            {
+                "key": f"prompt{day}", "node_id": str(node_id),
+                "widget": "text", "label": f"第 {day} 天动作提示词",
+                "required": True,
+            }
+            for day, node_id in enumerate(
+                (7583, 7614, 7645, 7676, 7707, 7819, 7855), 1
+            )
+        ],
+        timeout=7200,
     ),
     workflow(
         "animate_transfer", "Animate 动作迁移 ProMax", "根据动作视频驱动人物并自动匹配尺寸",

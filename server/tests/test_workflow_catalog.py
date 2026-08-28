@@ -27,6 +27,25 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
         "interaction": "rgthree_toggle",
     }
     assert by_key("scail_seven_outfit")["spec"]["outputs"][0]["node_id"] == "670"
+    ootd = by_key("ootd_7day")
+    assert [item["key"] for item in ootd["inputs"]] == [
+        *[
+            key
+            for day in range(1, 8)
+            for key in (f"day{day}", f"prompt{day}")
+        ],
+        "audio",
+    ]
+    assert ootd["spec"]["texts"] == [
+        {
+            "key": f"prompt{day}", "node_id": str(node_id),
+            "widget": "text", "label": f"第 {day} 天动作提示词",
+            "required": True,
+        }
+        for day, node_id in enumerate(
+            (7583, 7614, 7645, 7676, 7707, 7819, 7855), 1
+        )
+    ]
     scail_multi = by_key("scail_multi_reference")
     assert [item["key"] for item in scail_multi["inputs"]] == [
         "motion_video", "reference1", "reference2",
