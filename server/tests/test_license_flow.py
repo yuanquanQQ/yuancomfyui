@@ -184,3 +184,33 @@ def test_custom_card_requires_duration_and_void_is_final(tmp_path):
             "action": "enable"
         }).status_code == 409
         assert client.post("/api/v1/license/activate", json=activation(card)).status_code == 409
+
+
+def test_admin_can_disable_used_card_and_bound_license(tmp_path):
+    with build_client(tmp_path) as client:
+        headers = admin_headers(client)
+        card = generate_card(client, headers)
+        activated = client.post("/api/v1/license/activate", json=activation(card)).json()
+        card_item = client.get("/api/admin/cards", headers=headers).json()["items"][0]
+
+        disabled = client.patch(
+            f"/api/admin/cards/{card_item['id']}", headers=headers,
+            json={"action": "disable"},
+        )
+        assert disabled.status_code == 200, disabled.text
+        assert disabled.json()["status"] == "disabled"
+        assert disabled.json()["license_status"] == "disabled"
+        assert client.post(
+            "/api/v1/license/check", json=check_payload(activated)
+        ).status_code == 403
+
+        enabled = client.patch(
+            f"/api/admin/cards/{card_item['id']}", headers=headers,
+            json={"action": "enable"},
+        )
+        assert enabled.status_code == 200, enabled.text
+        assert enabled.json()["status"] == "used"
+        assert enabled.json()["license_status"] == "active"
+        assert client.post(
+            "/api/v1/license/check", json=check_payload(activated)
+        ).status_code == 200

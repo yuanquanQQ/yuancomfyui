@@ -21,7 +21,7 @@ class FakeHttpServer:
 
 def test_configured_port_defaults_and_supports_override(monkeypatch):
     monkeypatch.delenv("YUNCOMFYUI_PORT", raising=False)
-    assert server._configured_port() == 8080
+    assert server._configured_port() == 8081
 
     monkeypatch.setenv("YUNCOMFYUI_PORT", "9000")
     assert server._configured_port() == 9000
@@ -35,15 +35,15 @@ def test_configured_port_rejects_invalid_override(monkeypatch):
 
 def test_http_server_scans_forward_when_preferred_port_is_occupied():
     FakeHttpServer.attempts = []
-    FakeHttpServer.blocked_ports = {8080, 8081}
+    FakeHttpServer.blocked_ports = {8081, 8082}
 
     httpd, actual_port = server._create_http_server(
-        8080, server_class=FakeHttpServer
+        8081, server_class=FakeHttpServer
     )
 
-    assert actual_port == 8082
-    assert httpd.server_address == ("127.0.0.1", 8082)
-    assert FakeHttpServer.attempts == [8080, 8081, 8082]
+    assert actual_port == 8083
+    assert httpd.server_address == ("127.0.0.1", 8083)
+    assert FakeHttpServer.attempts == [8081, 8082, 8083]
 
 
 def test_http_server_allows_os_selected_port():

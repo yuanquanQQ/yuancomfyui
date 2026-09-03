@@ -1049,42 +1049,30 @@ class BrowserRunner:
         before = self._read_upload_widget(node_id, file_widget)
         logger.info("  Before: %s", json.dumps(before, ensure_ascii=False))
 
-        # Videos can take much longer than the old fixed three-second wait.
-        # Upload them through the HTTP endpoint first so returning from this
-        # method means the server really received the complete file. The UI
-        # chooser remains a fallback for accounts where that endpoint changes.
+        # Use ComfyUI's native chooser first.  This is the original upload path
+        # and works across accounts/environments where the authenticated HTTP
+        # upload endpoints are unavailable or behave differently.  The direct
+        # request path remains a verified fallback for machines where the
+        # browser file chooser cannot be controlled.
         direct_upload = None
-        if file_widget == "video":
+        try:
+            logger.info("  [A] Native UI upload...")
+            self._upload_via_ui_chooser(node_id, widget_name, file_path)
+        except Exception as ui_exc:
+            logger.info(
+                "  UI upload failed (%s), trying verified direct upload...",
+                str(ui_exc)[:120],
+            )
+            self._dismiss_popups()
             try:
-                logger.info("  [C] Verified direct video upload...")
                 direct_upload = self._upload_via_fetch_and_callback(
                     node_id, widget_name, file_widget, file_path,
                 )
-                logger.info("  [C] Video upload confirmed: %s", direct_upload)
             except Exception as direct_exc:
-                logger.warning(
-                    "  [C] Direct video upload failed (%s); using UI chooser",
-                    str(direct_exc)[:120],
-                )
-
-        if direct_upload is None:
-            try:
-                self._upload_via_ui_chooser(node_id, widget_name, file_path)
-            except Exception as ui_exc:
-                logger.info(
-                    "  UI upload failed (%s), trying verified direct upload...",
-                    str(ui_exc)[:120],
-                )
-                self._dismiss_popups()
-                try:
-                    direct_upload = self._upload_via_fetch_and_callback(
-                        node_id, widget_name, file_widget, file_path,
-                    )
-                except Exception as direct_exc:
-                    logger.error("  Direct upload failed: %s", direct_exc)
-                    raise RuntimeError(
-                        f"All upload strategies failed for node {node_id}"
-                    ) from direct_exc
+                logger.error("  Direct upload failed: %s", direct_exc)
+                raise RuntimeError(
+                    f"All upload strategies failed for node {node_id}"
+                ) from direct_exc
 
         # ---- Verify ----
         after = self._read_upload_widget(node_id, file_widget)

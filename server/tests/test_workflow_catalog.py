@@ -1,4 +1,8 @@
-from app.workflow_catalog import DEFAULT_WORKFLOW_KEY, WORKFLOW_CATALOG
+from app.workflow_catalog import (
+    DEFAULT_WORKFLOW_KEY,
+    OOTD_DEFAULT_PROMPTS,
+    WORKFLOW_CATALOG,
+)
 
 
 def by_key(key):
@@ -46,6 +50,15 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
             (7583, 7614, 7645, 7676, 7707, 7819, 7855), 1
         )
     ]
+    assert [
+        item["default"] for item in ootd["inputs"]
+        if item.get("input_type") == "text"
+    ] == list(OOTD_DEFAULT_PROMPTS)
+    assert by_key("scail_4k_pose_background")["inputs"][2]["default"]
+    assert by_key("krea2_realistic_4k")["inputs"][0]["default"]
+    assert by_key("auto_storyboard_short_video")["inputs"][1]["default"] == "12，包含一个手部特写"
+    assert by_key("firered_ecommerce_tryon")["inputs"][2]["default"]
+    assert by_key("minimax_h3_dual_stage")["inputs"][1]["default"]
     scail_multi = by_key("scail_multi_reference")
     assert [item["key"] for item in scail_multi["inputs"]] == [
         "motion_video", "reference1", "reference2",
@@ -66,6 +79,31 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
         ],
     ]
     assert by_key("qwen_prompt_image")["spec"]["outputs"][0]["node_id"] == "161"
+    animate = by_key("animate_transfer")
+    assert animate["inputs"][2:] == [
+        {
+            "key": "motion_strength", "label": "动作幅度（节点 266）",
+            "media_type": "image", "input_type": "number",
+            "default": 0.2, "min": 0, "step": 0.01,
+        },
+        {
+            "key": "frame_load_cap", "label": "加载帧数上限（节点 422）",
+            "media_type": "image", "input_type": "integer",
+            "default": 900, "min": 1, "step": 1,
+        },
+    ]
+    assert animate["spec"]["widgets"] == [
+        {
+            "key": "motion_strength", "node_id": "266",
+            "widget": "value", "label": "动作幅度",
+            "value_type": "number", "default": 0.2,
+        },
+        {
+            "key": "frame_load_cap", "node_id": "422",
+            "widget": "value", "label": "加载帧数上限",
+            "value_type": "integer", "default": 900,
+        },
+    ]
     detail_restore = by_key("hd_restore_detail_v2")
     assert detail_restore["name"] == "高定版高清修复【去AI感加细节】洗图"
     assert detail_restore["primary_input"] == "source"
@@ -120,6 +158,15 @@ def test_all_catalog_entries_have_runnable_server_configuration():
         assert item["post_id"].isdigit()
         assert item["inputs"]
         assert item["spec"]["outputs"]
+
+
+def test_every_exposed_text_input_has_a_workflow_default():
+    for workflow in WORKFLOW_CATALOG:
+        inputs_by_key = {item["key"]: item for item in workflow["inputs"]}
+        for text_spec in workflow["spec"]["texts"]:
+            input_spec = inputs_by_key[text_spec["key"]]
+            assert input_spec["input_type"] == "text"
+            assert str(input_spec.get("default") or "").strip()
 
 
 def test_frontend_workflow_descriptions():

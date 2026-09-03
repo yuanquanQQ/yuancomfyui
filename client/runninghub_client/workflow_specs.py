@@ -30,7 +30,7 @@ class TextInputSpec:
 
 @dataclass(frozen=True)
 class WidgetInputSpec:
-    """Map one logical boolean input to a ComfyUI node widget."""
+    """Map one logical boolean or numeric input to a ComfyUI node widget."""
 
     key: str
     node_id: str
@@ -39,8 +39,9 @@ class WidgetInputSpec:
     true_value: Any = "yes"
     false_value: Any = "no"
     required: bool = True
-    default: Optional[bool] = None
+    default: Optional[Any] = None
     interaction: str = "value"
+    value_type: str = "boolean"
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,30 @@ class WorkflowSpec:
                         f"Workflow {self.name!r} requires input "
                         f"{widget_input.key!r}"
                     )
+                continue
+            if widget_input.value_type in {"number", "integer"}:
+                if isinstance(raw_value, bool):
+                    raise ValueError(
+                        f"Workflow {self.name!r} input "
+                        f"{widget_input.key!r} must be numeric"
+                    )
+                try:
+                    numeric = float(raw_value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Workflow {self.name!r} input "
+                        f"{widget_input.key!r} must be numeric"
+                    ) from exc
+                if widget_input.value_type == "integer":
+                    if not numeric.is_integer():
+                        raise ValueError(
+                            f"Workflow {self.name!r} input "
+                            f"{widget_input.key!r} must be an integer"
+                        )
+                    value = int(numeric)
+                else:
+                    value = numeric
+                resolved.append((widget_input, value))
                 continue
             if isinstance(raw_value, bool):
                 enabled = raw_value

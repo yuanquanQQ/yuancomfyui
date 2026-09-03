@@ -152,6 +152,36 @@ class SchedulerTests(unittest.TestCase):
             with mock.patch.object(server.sys, "frozen", True, create=True):
                 self.assertTrue(server._browser_headless())
 
+    def test_shutdown_application_cancels_queued_and_running_tasks(self):
+        class Runner:
+            def __init__(self):
+                self.cancelled = False
+
+            def request_cancel(self):
+                self.cancelled = True
+
+        runner = Runner()
+        now = time.time()
+        server._shutdown_started = False
+        server._tasks.clear()
+        server._task_queue.clear()
+        server._account_busy.clear()
+        server._tasks["queued"] = {"task_id": "queued", "status": "queued"}
+        server._tasks["running"] = {
+            "task_id": "running", "status": "running", "runner": runner,
+        }
+        server._task_queue.append("queued")
+        server._account_busy.add("account_a")
+
+        server._shutdown_application()
+
+        assert server._tasks["queued"]["status"] == "cancelled"
+        assert server._tasks["running"]["status"] == "cancelled"
+        assert runner.cancelled is True
+        assert not server._task_queue
+        assert not server._account_busy
+        server._shutdown_started = False
+
     def test_failed_task_releases_account_and_dispatches_next(self):
         self.add_account("account_a")
         self.add_task("task_a")
@@ -470,14 +500,12 @@ class BrowserUploadTests(unittest.TestCase):
         self.assertEqual("uploaded.png", payload["value"])
         self.assertEqual("image", payload["widgetName"])
 
-    def test_video_upload_prefers_verified_direct_transfer(self):
+    def test_video_upload_prefers_native_ui_transfer(self):
         runner = BrowserRunner.__new__(BrowserRunner)
         runner._page = mock.MagicMock()
         runner._comfy = mock.MagicMock()
         runner._dismiss_popups = mock.Mock()
-        runner._upload_via_fetch_and_callback = mock.Mock(return_value={
-            "filename": "new-video.mp4", "endpoint": "/upload/video",
-        })
+        runner._upload_via_fetch_and_callback = mock.Mock()
         runner._upload_via_ui_chooser = mock.Mock()
         runner._read_upload_widget = mock.Mock(side_effect=[
             {"state": "found", "fileValue": "old-video.mp4"},
@@ -492,8 +520,8 @@ class BrowserUploadTests(unittest.TestCase):
                 file_widget="video",
             )
 
-        runner._upload_via_fetch_and_callback.assert_called_once()
-        runner._upload_via_ui_chooser.assert_not_called()
+        runner._upload_via_ui_chooser.assert_called_once()
+        runner._upload_via_fetch_and_callback.assert_not_called()
 
     def test_unchanged_ui_upload_forces_verified_direct_transfer(self):
         runner = BrowserRunner.__new__(BrowserRunner)

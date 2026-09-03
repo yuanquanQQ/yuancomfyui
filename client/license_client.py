@@ -17,6 +17,9 @@ import requests
 from cryptography.hazmat.primitives import serialization
 
 
+# Kept as compatibility constants for integrations that import them.  The
+# client now performs online validation on every status request, so these
+# legacy interval values are no longer used for throttling.
 CHECK_INTERVAL_SECONDS = 12 * 60 * 60
 RETRY_INTERVAL_SECONDS = 60
 
@@ -342,10 +345,11 @@ class LicenseManager:
             if self.state.get("server_denied"):
                 return self._public_status(False, self.state.get("last_error") or "授权不可用")
             now = time.time()
-            last_check = float(self.state.get("last_check_at") or 0)
-            # Startup is local-first: a valid signed receipt is sufficient to
-            # open the client. Explicit "重新校验" still uses check_now().
-            if False and check_online and now - last_check >= CHECK_INTERVAL_SECONDS and now - self.last_attempt_at >= RETRY_INTERVAL_SECONDS:
+            # Every online status request is authoritative.  This keeps the
+            # normal client path and the manual "重新校验" action in sync;
+            # the signed receipt remains the offline fallback when the server
+            # cannot be reached.
+            if check_online:
                 self.last_attempt_at = now
                 try:
                     self._check_online()
@@ -356,6 +360,7 @@ class LicenseManager:
                     self.state["last_error"] = str(exc)
                     self._save_state()
                     return self._public_status(False, str(exc))
+                now = time.time()
             receipt = self.state.get("receipt")
             key = self.state.get("public_key_pem")
             try:

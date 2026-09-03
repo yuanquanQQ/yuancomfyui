@@ -138,14 +138,15 @@ async function loadCards() {
     <td>${escapeHtml(planName(card.plan_type))}</td>
     <td><span class="badge ${escapeHtml(card.status)}">${escapeHtml(statusName(card.status))}</span></td>
     <td>${escapeHtml(card.channel || '--')}</td><td>${formatDate(card.created_at)}</td><td>${formatDate(card.used_at)}</td>
-    <td><div class="row-actions">${card.status === 'unused' ? `<button data-card-action="disable" data-id="${card.id}">禁用</button><button class="danger" data-card-action="void" data-id="${card.id}">作废</button>` : ''}${card.status === 'disabled' ? `<button data-card-action="enable" data-id="${card.id}">恢复</button>` : ''}</div></td>
+    <td><div class="row-actions">${card.status === 'unused' ? `<button data-card-action="disable" data-id="${card.id}">禁用</button><button class="danger" data-card-action="void" data-id="${card.id}">作废</button>` : ''}${card.status === 'used' ? `<button class="danger" data-card-action="disable" data-id="${card.id}">禁用</button>` : ''}${card.status === 'disabled' ? `<button data-card-action="enable" data-id="${card.id}">恢复</button>` : ''}</div></td>
   </tr>`).join('');
 }
 
 async function cardAction(button) {
   const action = button.dataset.cardAction;
   const labels = { disable: '禁用', enable: '恢复', void: '作废' };
-  if (!confirm(`确认${labels[action]}这张卡密？`)) return;
+  const warning = action === 'disable' ? '已使用卡密会同时禁用关联授权。' : '';
+  if (!confirm(`确认${labels[action]}这张卡密？\n${warning}`)) return;
   setBusy(button, true);
   try {
     await bridge('update_card', button.dataset.id, action);

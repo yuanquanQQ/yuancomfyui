@@ -77,3 +77,27 @@ def test_boolean_widget_values_are_mapped_for_comfyui():
     assert spec.resolve_widgets({})[0][1] is True
     with pytest.raises(ValueError, match="must be boolean"):
         spec.resolve_widgets({"upload_background": "sometimes"})
+
+
+def test_numeric_widget_values_are_preserved_for_comfyui():
+    config = sample_config()
+    config["widgets"] = [
+        {
+            "key": "motion_strength", "node_id": "266",
+            "widget": "value", "label": "动作幅度",
+            "value_type": "number", "default": 0.2,
+        },
+        {
+            "key": "frame_load_cap", "node_id": "422",
+            "widget": "value", "label": "加载帧数上限",
+            "value_type": "integer", "default": 900,
+        },
+    ]
+    spec = workflow_spec_from_dict(config)
+
+    assert [value for _, value in spec.resolve_widgets({})] == [0.2, 900]
+    assert [value for _, value in spec.resolve_widgets({
+        "motion_strength": "0.35", "frame_load_cap": "720",
+    })] == [0.35, 720]
+    with pytest.raises(ValueError, match="integer"):
+        spec.resolve_widgets({"motion_strength": 0.2, "frame_load_cap": 12.5})

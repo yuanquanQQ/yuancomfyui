@@ -94,6 +94,28 @@ class LicenseClientTests(unittest.TestCase):
                 manager.state_path.read_text(encoding="utf-8")
             ))
 
+    def test_status_checks_online_on_every_online_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = LicenseManager(Path(directory) / "state", "https://license.example")
+            manager.state.update({
+                "license_id": "license-id",
+                "receipt": "signed-receipt",
+                "public_key_pem": "public-key",
+            })
+            manager._check_online = mock.Mock()
+            manager._verify_receipt = mock.Mock(return_value={
+                "license_id": "license-id",
+                "machine_hash": machine_hash(),
+                "status": "active",
+                "offline_until": (_utcnow() + timedelta(hours=1)).isoformat(),
+            })
+
+            manager.status(check_online=True)
+            manager.status(check_online=True)
+            manager.status(check_online=False)
+
+            self.assertEqual(2, manager._check_online.call_count)
+
 
 if __name__ == "__main__":
     unittest.main()

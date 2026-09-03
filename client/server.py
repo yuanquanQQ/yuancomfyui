@@ -8,6 +8,7 @@ from email.policy import default as email_policy
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -219,7 +220,7 @@ DATA = APP_ROOT / "data"
 UPLOADS = APP_ROOT / "uploads"
 PROFILES = APP_ROOT / "profiles"
 STATIC = BUNDLE_ROOT / "static"
-DEFAULT_PORT = 8080
+DEFAULT_PORT = 8081
 PORT_SCAN_ATTEMPTS = 100
 MAX_WORKERS = 10
 LOGIN_WORKERS = 2
@@ -400,6 +401,8 @@ _tasks_lock = threading.RLock()
 _login_processes: dict[str, object] = {}
 _login_sessions: dict[str, dict] = {}
 _login_lock = threading.RLock()
+_shutdown_lock = threading.Lock()
+_shutdown_started = False
 
 LOGIN_STAGES = {
     "starting", "slider", "code_required", "verifying",
@@ -717,6 +720,64 @@ def _reap_login_processes():
         _dispatch_tasks()
 
 
+def _shutdown_application():
+    """Cancel active work and terminate child processes before pywebview exits."""
+    global _shutdown_started
+    with _shutdown_lock:
+        if _shutdown_started:
+            return
+        _shutdown_started = True
+
+    now = time.time()
+    with _tasks_lock:
+        queued = list(_task_queue)
+        _task_queue.clear()
+        for task_id in queued:
+            task = _tasks.get(task_id)
+            if task and task.get("status") == "queued":
+                task.update({
+                    "status": "cancelled", "stage": "cancelled",
+                    "stage_detail": "应用已关闭，任务已取消",
+                    "completed_at": now, "error": "应用已关闭，任务已取消",
+                })
+        runners = [
+            task.get("runner") for task in _tasks.values()
+            if task.get("status") == "running" and task.get("runner")
+        ]
+        for task in _tasks.values():
+            if task.get("status") == "running":
+                task["cancel_requested"] = True
+                task.update({
+                    "status": "cancelled", "stage": "cancelled",
+                    "stage_detail": "应用已关闭，正在取消任务",
+                    "completed_at": now, "error": "应用已关闭，任务已取消",
+                })
+        _account_busy.clear()
+    for runner in runners:
+        try:
+            runner.request_cancel()
+        except Exception:
+            logger.exception("Failed to request browser task cancellation")
+
+    with _login_lock:
+        login_items = list(_login_processes.items())
+        _login_processes.clear()
+        for _account, session in _login_sessions.items():
+            if session.get("stage") not in {"completed", "failed", "stopped"}:
+                _set_login_status_locked(session, "stopped", "应用已关闭")
+    for _account, proc in login_items:
+        if proc and hasattr(proc, "poll") and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+    logger.info("Application shutdown requested; active tasks and logins cancelled")
+
+
 def _account_list() -> list[dict]:
     PROFILES.mkdir(parents=True, exist_ok=True)
     _reap_login_processes()
@@ -877,6 +938,30 @@ def _input_condition_met(input_spec: dict, values: dict) -> bool:
     return values.get(condition["key"]) == condition.get("equals", True)
 
 
+def _parse_numeric_input(raw_value, input_spec: dict):
+    label = input_spec.get("label", input_spec["key"])
+    input_type = input_spec.get("input_type")
+    if isinstance(raw_value, bool):
+        raise ValueError(f"{label}必须是数字")
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}必须是数字") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{label}必须是有限数字")
+    if input_type == "integer":
+        if not value.is_integer():
+            raise ValueError(f"{label}必须是整数")
+        value = int(value)
+    minimum = input_spec.get("min")
+    maximum = input_spec.get("max")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{label}不能小于{minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{label}不能大于{maximum}")
+    return value
+
+
 def _resolve_workflow_inputs(workflow: dict, data: dict) -> dict[str, object]:
     resolved: dict[str, object] = {}
     input_specs = workflow["inputs"]
@@ -903,13 +988,24 @@ def _resolve_workflow_inputs(workflow: dict, data: dict) -> dict[str, object]:
         if not _input_condition_met(input_spec, resolved):
             continue
         required = _input_is_required(input_spec, resolved)
-        if input_spec.get("input_type") == "text":
-            value = str(data.get(key) or "").strip()
+        input_type = input_spec.get("input_type")
+        if input_type == "text":
+            value = str(
+                data.get(key) or input_spec.get("default") or ""
+            ).strip()
             if not value:
                 if required:
                     raise ValueError(f"缺少{label}")
                 continue
             resolved[key] = value
+            continue
+        if input_type in {"number", "integer"}:
+            raw_value = data.get(key, input_spec.get("default"))
+            if raw_value in (None, ""):
+                if required:
+                    raise ValueError(f"缺少{label}")
+                continue
+            resolved[key] = _parse_numeric_input(raw_value, input_spec)
             continue
         try:
             value = _resolve_uploaded_material(data.get(key), required=required)
@@ -955,6 +1051,10 @@ def _resolve_batch_workflow_inputs(workflow: dict, data: dict) -> list[dict[str,
             continue
         label = input_spec.get("label", key)
         raw_values = raw_inputs.get(key)
+        input_type = input_spec.get("input_type")
+        if (input_type in {"text", "number", "integer"}
+                and not raw_values and "default" in input_spec):
+            raw_values = [input_spec["default"]]
         may_be_optional = (
             not input_spec.get("required", True)
             or bool(input_spec.get("required_when"))
@@ -963,12 +1063,19 @@ def _resolve_batch_workflow_inputs(workflow: dict, data: dict) -> list[dict[str,
             raw_values = []
         if not isinstance(raw_values, list):
             raise ValueError(f"{label}必须是批量列表")
-        values = [str(value or "").strip() for value in raw_values]
-        values = [value for value in values if value]
-
-        if input_spec.get("input_type") == "text":
+        if input_type in {"number", "integer"}:
+            values = [
+                _parse_numeric_input(value, input_spec)
+                for value in raw_values if value not in (None, "")
+            ]
             resolved[key] = values or [None]
         else:
+            values = [str(value or "").strip() for value in raw_values]
+            values = [value for value in values if value]
+
+        if input_type == "text":
+            resolved[key] = values or [None]
+        elif input_type not in {"number", "integer"}:
             try:
                 resolved[key] = ([
                     _resolve_uploaded_material(value) for value in values
@@ -1018,7 +1125,7 @@ def _new_task(
     input_files = {}
     for key, value in input_paths.items():
         input_type = input_types.get(key)
-        if input_type == "text":
+        if input_type in {"text", "number", "integer"}:
             input_files[key] = str(value)[:80]
         elif input_type == "boolean":
             input_files[key] = "开启" if value else "关闭"
@@ -2038,17 +2145,19 @@ def main():
     server_thread.start()
     try:
         import webview
-        webview.create_window(
+        window = webview.create_window(
             "云创工作台",
             f"http://127.0.0.1:{actual_port}",
             width=1480,
             height=920,
             min_size=(1080, 700),
         )
+        window.events.closing += lambda *_args: _shutdown_application()
         webview.start(debug=False)
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        _shutdown_application()
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=5)

@@ -153,24 +153,66 @@ def update_card(card_id: str, payload: CardStatusRequest, request: Request,
         raise HTTPException(status_code=404, detail="卡密不存在")
     transitions = {
         "disable": CardStatus.DISABLED.value,
-        "enable": CardStatus.UNUSED.value,
         "void": CardStatus.VOID.value,
     }
-    if payload.action == "disable" and card.status != CardStatus.UNUSED.value:
-        raise HTTPException(status_code=409, detail="只有未使用卡密可以禁用")
+    if payload.action == "disable" and card.status not in {
+        CardStatus.UNUSED.value, CardStatus.USED.value,
+    }:
+        raise HTTPException(status_code=409, detail="只有未使用或已使用卡密可以禁用")
     if payload.action == "enable" and card.status != CardStatus.DISABLED.value:
-        raise HTTPException(status_code=409, detail="只有已禁用且未使用的卡密可以恢复")
+        raise HTTPException(status_code=409, detail="只有已禁用卡密可以恢复")
     if payload.action == "void" and card.status not in {
         CardStatus.UNUSED.value, CardStatus.DISABLED.value
     }:
         raise HTTPException(status_code=409, detail="已使用或已作废卡密不能再次作废")
-    card.status = transitions[payload.action]
+    now = utcnow()
+    if payload.action == "enable":
+        # A disabled card may have been unused or already consumed. Preserve
+        # that history instead of turning a used key back into an activatable
+        # one. Used keys also control their bound license, so restore it when
+        # the license has not expired.
+        card.status = (
+            CardStatus.USED.value
+            if card.used_at is not None or card.license_id
+            else CardStatus.UNUSED.value
+        )
+        if card.license_id:
+            license_record = db.get(License, card.license_id)
+            if license_record:
+                license_record.status = (
+                    LicenseStatus.ACTIVE.value
+                    if not license_record.expires_at
+                    or aware(license_record.expires_at) > now
+                    else LicenseStatus.EXPIRED.value
+                )
+                license_record.updated_at = now
+    else:
+        card.status = transitions[payload.action]
+        if payload.action == "disable" and card.license_id:
+            license_record = db.get(License, card.license_id)
+            if license_record:
+                license_record.status = LicenseStatus.DISABLED.value
+                license_record.updated_at = now
     request.app.state.license_service.audit(
         db, f"card.{payload.action}", "admin", admin.id, "card", card.id,
         ip_address=client_ip,
     )
+    if payload.action in {"disable", "enable"} and card.license_id:
+        request.app.state.license_service.audit(
+            db, f"card.{payload.action}.license", "admin", admin.id,
+            "license", card.license_id, {"card_id": card.id}, client_ip,
+        )
     db.commit()
-    return {"id": card.id, "status": card.status}
+    return {
+        "id": card.id,
+        "status": card.status,
+        "license_id": card.license_id,
+        "license_status": (
+            db.get(License, card.license_id).status
+            if card.license_id and db.get(License, card.license_id)
+            else None
+        ),
+    }
 
 
 @router.get("/licenses")
