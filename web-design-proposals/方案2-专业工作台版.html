@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>方案二：专业工作台版 - 云创工作台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#13795b',
+                        primaryDark: '#0e654b',
+                        primaryLight: '#e8f5f0',
+                        sidebar: '#17231f',
+                        bg: '#f3f5f7',
+                    },
+                    fontFamily: {
+                        sans: ['Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+            .safe-bottom {
+                padding-bottom: env(safe-area-inset-bottom, 0);
+            }
+            .panel-shadow {
+                box-shadow: 0 8px 24px rgba(31,44,39,.07);
+            }
+            .scrollbar-hide::-webkit-scrollbar {
+                display: none;
+            }
+            .scrollbar-hide {
+                -ms-overflow-style: none;
+                scrollbar-width: none;
+            }
+        }
+    </style>
+</head>
+<body class="bg-bg text-gray-800 font-sans min-h-screen">
+    <div class="app min-h-screen md:grid md:grid-cols-[232px_minmax(0,1fr)]">
+        <!-- 侧边栏 (桌面端) -->
+        <aside class="hidden md:flex flex-col bg-sidebar text-white h-screen sticky top-0 p-5">
+            <div class="flex items-center gap-3 mb-8">
+                <div class="w-9 h-9 rounded-lg bg-primary flex items-center justify-center font-bold">云</div>
+                <div>
+                    <div class="font-bold text-base">云创工作台</div>
+                    <div class="text-xs text-green-200/70">PROFESSIONAL</div>
+                </div>
+            </div>
+
+            <nav class="flex-1 space-y-1">
+                <div class="text-xs text-green-200/50 font-bold uppercase px-3 mb-2 mt-4">工作台</div>
+                <button class="w-full h-10 rounded-lg bg-primary/20 text-white flex items-center gap-3 px-3 text-sm font-medium">
+                    <i class="fa fa-paint-brush w-5 text-center"></i>
+                    <span>创作</span>
+                </button>
+                <button class="w-full h-10 rounded-lg hover:bg-white/5 text-green-100/80 flex items-center gap-3 px-3 text-sm">
+                    <i class="fa fa-tasks w-5 text-center"></i>
+                    <span>任务队列</span>
+                    <span class="ml-auto bg-white/10 text-xs px-2 py-0.5 rounded-full">3</span>
+                </button>
+                <button class="w-full h-10 rounded-lg hover:bg-white/5 text-green-100/80 flex items-center gap-3 px-3 text-sm">
+                    <i class="fa fa-database w-5 text-center"></i>
+                    <span>素材库</span>
+                </button>
+                <button class="w-full h-10 rounded-lg hover:bg-white/5 text-green-100/80 flex items-center gap-3 px-3 text-sm">
+                    <i class="fa fa-history w-5 text-center"></i>
+                    <span>作品管理</span>
+                </button>
+
+                <div class="text-xs text-green-200/50 font-bold uppercase px-3 mb-2 mt-6">设置</div>
+                <button class="w-full h-10 rounded-lg hover:bg-white/5 text-green-100/80 flex items-center gap-3 px-3 text-sm">
+                    <i class="fa fa-user-o w-5 text-center"></i>
+                    <span>账号管理</span>
+                </button>
+                <button class="w-full h-10 rounded-lg hover:bg-white/5 text-green-100/80 flex items-center gap-3 px-3 text-sm">
+                    <i class="fa fa-cog w-5 text-center"></i>
+                    <span>系统设置</span>
+                </button>
+            </nav>
+
+            <div class="mt-auto pt-4 border-t border-white/10">
+                <div class="flex items-center gap-2 p-2 rounded-lg bg-white/5">
+                    <div class="w-8 h-8 rounded-full bg-primaryLight text-primary flex items-center justify-center text-sm font-medium">U</div>
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm font-medium truncate">专业版用户</div>
+                        <div class="text-xs text-green-200/60">到期：2027-01-15</div>
+                    </div>
+                    <div class="w-2 h-2 rounded-full bg-green-400"></div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 移动端顶部栏 -->
+        <header class="md:hidden sticky top-0 z-30 bg-white border-b border-gray-200 h-14 px-4 flex items-center justify-between">
+            <button class="w-9 h-9 flex items-center justify-center text-gray-600">
+                <i class="fa fa-bars text-lg"></i>
+            </button>
+            <h1 class="font-bold text-primary">云创工作台</h1>
+            <button class="w-9 h-9 flex items-center justify-center text-gray-600">
+                <i class="fa fa-bell-o text-lg"></i>
+            </button>
+        </header>
+
+        <!-- 主内容区 -->
+        <main class="flex flex-col min-h-screen">
+            <!-- 桌面端顶栏 -->
+            <div class="hidden md:flex h-17 bg-white/95 backdrop-blur-sm border-b border-gray-200 items-center justify-between px-7 sticky top-0 z-20">
+                <div>
+                    <h2 class="text-lg font-bold">创作工作台</h2>
+                    <p class="text-xs text-gray-500">选择工作流并配置参数，开始创作</p>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div class="flex items-center gap-2 text-gray-500 text-sm">
+                        <div class="w-2 h-2 rounded-full bg-green-500"></div>
+                        <span>已连接 · 3个账号在线</span>
+                    </div>
+                    <button class="h-9 px-4 rounded-lg border border-gray-200 text-sm hover:bg-gray-50">
+                        <i class="fa fa-question-circle-o mr-1"></i> 帮助
+                    </button>
+                </div>
+            </div>
+
+            <!-- 工作区 (桌面三栏) -->
+            <div class="flex-1 p-4 md:p-6 pb-24 md:pb-6">
+                <div class="workspace grid grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)_300px] gap-4 lg:gap-5">
+                    <!-- 工作流选择面板 -->
+                    <div class="bg-white rounded-xl border border-gray-200 panel-shadow overflow-hidden">
+                        <div class="h-14 px-4 border-b border-gray-200 flex items-center justify-between">
+                            <h3 class="font-bold text-sm">工作流</h3>
+                            <span class="text-xs text-gray-500">12 个可用</span>
+                        </div>
+                        <div class="p-3">
+                            <div class="relative mb-3">
+                                <i class="fa fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm"></i>
+                                <input type="text" placeholder="搜索工作流..." class="w-full h-9 pl-9 pr-3 rounded-lg bg-gray-50 border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/10">
+                            </div>
+                            <div class="flex gap-1 mb-3 overflow-x-auto scrollbar-hide pb-1">
+                                <button class="h-7 px-3 rounded-md bg-primaryLight text-primary text-xs font-bold flex-shrink-0">全部</button>
+                                <button class="h-7 px-3 rounded-md hover:bg-gray-100 text-gray-600 text-xs flex-shrink-0">图片生成</button>
+                                <button class="h-7 px-3 rounded-md hover:bg-gray-100 text-gray-600 text-xs flex-shrink-0">视频生成</button>
+                                <button class="h-7 px-3 rounded-md hover:bg-gray-100 text-gray-600 text-xs flex-shrink-0">图片处理</button>
+                            </div>
+                            <div class="space-y-1 max-h-[500px] overflow-y-auto scrollbar-hide">
+                                <button class="w-full p-3 rounded-lg border border-primary/30 bg-primaryLight text-left">
+                                    <div class="flex items-start gap-3">
+                                        <div class="w-10 h-10 rounded-lg bg-white text-primary flex items-center justify-center font-bold">文</div>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="font-semibold text-sm mb-0.5">文字生图</div>
+                                            <div class="text-xs text-gray-500 line-clamp-1">输入提示词生成高质量图片</div>
+                                        </div>
+                                    </div>
+                                </button>
+                                <button class="w-full p-3 rounded-lg hover:bg-gray-50 text-left">
+                                    <div class="flex items-start gap-3">
+                                        <div class="w-10 h-10 rounded-lg bg-gray-100 text-gray-600 flex items-center justify-center font-bold">图</div>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="font-semibold text-sm mb-0.5">图生图</div>
+                                            <div class="text-xs text-gray-500 line-clamp-1">参考图片风格生成新图片</div>
+                                        </div>
+                                    </div>
+                                </button>
+                                <button class="w-full p-3 rounded-lg hover:bg-gray-50 text-left">
+                                    <div class="flex items-start gap-3">
+                                        <div class="w-10 h-10 rounded-lg bg-gray-100 text-gray-600 flex items-center justify-center font-bold">舞</div>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="font-semibold text-sm mb-0.5">动作迁移</div>
+                                            <div class="text-xs text-gray-500 line-clamp-1">人物动作迁移生成跳舞视频</div>
+                                        </div>
+                                    </div>
+                                </button>
+                                <button class="w-full p-3 rounded-lg hover:bg-gray-50 text-left">
+                                    <div class="flex items-start gap-3">
+                                        <div class="w-10 h-10 rounded-lg bg-gray-100 text-gray-600 flex items-center justify-center font-bold">修</div>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="font-semibold text-sm mb-0.5">图片修复</div>
+                                            <div class="text-xs text-gray-500 line-clamp-1">老照片修复、去模糊、超分</div>
+                                        </div>
+                                    </div>
+                                </button>
+                                <button class="w-full p-3 rounded-lg hover:bg-gray-50 text-left">
+                                    <div class="flex items-start gap-3">
+                                        <div class="w-10 h-10 rounded-lg bg-gray-100 text-gray-600 flex items-center justify-center font-bold">换</div>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="font-semibold text-sm mb-0.5">AI换装</div>
+                                            <div class="text-xs text-gray-500 line-clamp-1">人物服装更换、风格迁移</div>
+                                        </div>
+                                    </div>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 参数配置面板 -->
+                    <div class="bg-white rounded-xl border border-gray-200 panel-shadow overflow-hidden">
+                        <div class="p-5 border-b border-gray-200">
+                            <div class="flex items-center gap-2 mb-2">
+                                <h3 class="font-bold text-lg">文字生图</h3>
+                                <span class="h-5 px-2 rounded bg-primaryLight text-primary text-xs font-bold flex items-center">图片</span>
+                            </div>
+                            <p class="text-sm text-gray-500">输入提示词生成高质量图片，支持多种风格和尺寸选择</p>
+                        </div>
+                        <div class="p-5">
+                            <div class="space-y-5">
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">正向提示词</label>
+                                    <textarea class="w-full min-h-[120px] p-3 rounded-lg border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 resize-y" placeholder="描述你想要生成的画面，例如：赛博朋克风格的少女，霓虹灯，雨天，未来城市..."></textarea>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">负向提示词</label>
+                                    <textarea class="w-full h-20 p-3 rounded-lg border border-gray-200 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 resize-none" placeholder="描述你不想要出现的内容..."></textarea>
+                                </div>
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-bold mb-2">宽度</label>
+                                        <select class="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm outline-none focus:border-primary">
+                                            <option>832</option>
+                                            <option>1024</option>
+                                            <option>1216</option>
+                                            <option>1536</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-bold mb-2">高度</label>
+                                        <select class="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm outline-none focus:border-primary">
+                                            <option>1216</option>
+                                            <option>1024</option>
+                                            <option>832</option>
+                                            <option>1536</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-bold mb-2">采样步数</label>
+                                        <input type="number" value="30" class="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm outline-none focus:border-primary">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-bold mb-2">CFG Scale</label>
+                                        <input type="number" value="7" step="0.5" class="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm outline-none focus:border-primary">
+                                    </div>
+                                </div>
+
+                                <div class="pt-4 border-t border-gray-200">
+                                    <div class="flex items-center justify-between mb-3">
+                                        <span class="text-sm font-bold">批量模式</span>
+                                        <label class="relative inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" class="sr-only peer">
+                                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+                                        </label>
+                                    </div>
+                                    <p class="text-xs text-gray-500">开启后支持批量上传素材、多组提示词批量生成</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="p-5 border-t border-gray-200 flex items-center justify-between gap-4">
+                            <div class="text-xs text-gray-500">
+                                <div class="font-medium text-gray-700 mb-0.5">预计消耗：8 积分</div>
+                                <div>预计等待时间：1-2 分钟</div>
+                            </div>
+                            <button class="h-11 px-6 rounded-lg bg-primary text-white font-bold text-sm hover:bg-primaryDark transition-colors">
+                                <i class="fa fa-rocket mr-2"></i>开始生成
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 状态面板 -->
+                    <div class="bg-white rounded-xl border border-gray-200 panel-shadow overflow-hidden">
+                        <div class="p-4 border-b border-gray-200">
+                            <h3 class="font-bold text-sm">运行状态</h3>
+                        </div>
+                        <div class="p-4 border-b border-gray-200">
+                            <div class="flex items-center justify-between mb-3">
+                                <span class="text-sm font-medium">账号状态</span>
+                                <span class="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-bold">3个在线</span>
+                            </div>
+                            <div class="space-y-2 text-xs">
+                                <div class="flex justify-between">
+                                    <span class="text-gray-500">等待队列</span>
+                                    <span class="font-medium">1 个任务</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-500">运行中</span>
+                                    <span class="font-medium">2 个任务</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-500">今日完成</span>
+                                    <span class="font-medium">18 个任务</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="p-4">
+                            <h4 class="text-xs font-bold text-gray-500 uppercase mb-3">最近任务</h4>
+                            <div class="space-y-3">
+                                <div class="flex gap-2 items-center">
+                                    <div class="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0"></div>
+                                    <div class="flex-1 min-w-0">
+                                        <div class="text-xs font-medium truncate">赛博朋克少女</div>
+                                        <div class="text-[10px] text-gray-500">62% · 运行中</div>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 items-center">
+                                    <div class="w-2 h-2 rounded-full bg-blue-500 flex-shrink-0"></div>
+                                    <div class="flex-1 min-w-0">
+                                        <div class="text-xs font-medium truncate">古风山水图</div>
+                                        <div class="text-[10px] text-gray-500">排队中</div>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 items-center">
+                                    <div class="w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></div>
+                                    <div class="flex-1 min-w-0">
+                                        <div class="text-xs font-medium truncate">卡通猫咪头像</div>
+                                        <div class="text-[10px] text-gray-500">已完成</div>
+                                    </div>
+                                </div>
+                                <div class="flex gap-2 items-center">
+                                    <div class="w-2 h-2 rounded-full bg-red-500 flex-shrink-0"></div>
+                                    <div class="flex-1 min-w-0">
+                                        <div class="text-xs font-medium truncate">科幻场景图</div>
+                                        <div class="text-[10px] text-gray-500">失败</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 任务列表 -->
+                <div class="mt-6 bg-white rounded-xl border border-gray-200 panel-shadow overflow-hidden">
+                    <div class="h-14 px-5 border-b border-gray-200 flex items-center justify-between">
+                        <h3 class="font-bold text-sm">任务列表</h3>
+                        <div class="flex gap-2">
+                            <button class="h-8 px-3 text-sm border-b-2 border-primary text-primary font-medium">全部</button>
+                            <button class="h-8 px-3 text-sm text-gray-500 hover:text-gray-700">运行中</button>
+                            <button class="h-8 px-3 text-sm text-gray-500 hover:text-gray-700">已完成</button>
+                            <button class="h-8 px-3 text-sm text-gray-500 hover:text-gray-700">失败</button>
+                        </div>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="bg-gray-50 text-gray-500 text-xs">
+                                    <th class="h-9 px-4 text-left font-medium">任务</th>
+                                    <th class="h-9 px-4 text-left font-medium">类型</th>
+                                    <th class="h-9 px-4 text-left font-medium">状态</th>
+                                    <th class="h-9 px-4 text-left font-medium">提交时间</th>
+                                    <th class="h-9 px-4 text-left font-medium">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr class="border-t border-gray-100 hover:bg-gray-50">
+                                    <td class="p-3">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-10 h-10 rounded overflow-hidden">
+                                                <img src="https://picsum.photos/seed/t1/100/100" class="w-full h-full object-cover">
+                                            </div>
+                                            <div>
+                                                <div class="font-medium text-sm">赛博朋克风格少女</div>
+                                                <div class="text-xs text-gray-500">832×1216 · 30步</div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="p-3 text-xs">文生图</td>
+                                    <td class="p-3"><span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-medium">运行中</span></td>
+                                    <td class="p-3 text-xs text-gray-500">2分钟前</td>
+                                    <td class="p-3">
+                                        <button class="text-xs text-primary hover:underline mr-2">查看</button>
+                                        <button class="text-xs text-red-500 hover:underline">取消</button>
+                                    </td>
+                                </tr>
+                                <tr class="border-t border-gray-100 hover:bg-gray-50">
+                                    <td class="p-3">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-10 h-10 rounded overflow-hidden">
+                                                <img src="https://picsum.photos/seed/t2/100/100" class="w-full h-full object-cover">
+                                            </div>
+                                            <div>
+                                                <div class="font-medium text-sm">古风山水图</div>
+                                                <div class="text-xs text-gray-500">1024×1024 · 25步</div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="p-3 text-xs">文生图</td>
+                                    <td class="p-3"><span class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">排队中</span></td>
+                                    <td class="p-3 text-xs text-gray-500">1分钟前</td>
+                                    <td class="p-3">
+                                        <button class="text-xs text-gray-400 mr-2">查看</button>
+                                        <button class="text-xs text-red-500 hover:underline">取消</button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 移动端底部导航 -->
+    <nav class="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 safe-bottom z-30 md:hidden">
+        <div class="grid grid-cols-4 h-16">
+            <button class="flex flex-col items-center justify-center gap-1 text-primary">
+                <i class="fa fa-paint-brush text-lg"></i>
+                <span class="text-xs font-medium">创作</span>
+            </button>
+            <button class="flex flex-col items-center justify-center gap-1 text-gray-400">
+                <i class="fa fa-tasks text-lg"></i>
+                <span class="text-xs">任务</span>
+            </button>
+            <button class="flex flex-col items-center justify-center gap-1 text-gray-400">
+                <i class="fa fa-folder-o text-lg"></i>
+                <span class="text-xs">素材</span>
+            </button>
+            <button class="flex flex-col items-center justify-center gap-1 text-gray-400">
+                <i class="fa fa-user-o text-lg"></i>
+                <span class="text-xs">我的</span>
+            </button>
+        </div>
+    </nav>
+</body>
+</html>

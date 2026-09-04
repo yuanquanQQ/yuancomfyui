@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>方案三：沉浸式创作版 - 云创工作台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#7c3aed',
+                        primaryDark: '#6d28d9',
+                        primaryLight: '#ede9fe',
+                        dark: {
+                            950: '#0f0f13',
+                            900: '#18181b',
+                            800: '#27272a',
+                            700: '#3f3f46',
+                            600: '#52525b',
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+            .safe-bottom {
+                padding-bottom: env(safe-area-inset-bottom, 0);
+            }
+            .glass {
+                backdrop-filter: blur(12px);
+                background: rgba(24, 24, 27, 0.8);
+            }
+            .gradient-border {
+                position: relative;
+            }
+            .gradient-border::before {
+                content: '';
+                position: absolute;
+                inset: 0;
+                border-radius: inherit;
+                padding: 1px;
+                background: linear-gradient(135deg, #7c3aed, #ec4899);
+                -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+                -webkit-mask-composite: xor;
+                mask-composite: exclude;
+                pointer-events: none;
+            }
+        }
+    </style>
+</head>
+<body class="bg-dark-950 text-gray-100 font-sans min-h-screen overflow-x-hidden">
+    <!-- 顶部导航 (半透明毛玻璃) -->
+    <header class="sticky top-0 z-40 glass border-b border-white/5">
+        <div class="max-w-[1800px] mx-auto px-4 md:px-6 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-primary to-pink-500 flex items-center justify-center font-bold">云</div>
+                <h1 class="text-lg font-bold bg-gradient-to-r from-primary to-pink-500 bg-clip-text text-transparent">YunCreate</h1>
+            </div>
+            <div class="hidden md:flex items-center gap-6 text-sm">
+                <button class="text-white font-medium">创作</button>
+                <button class="text-gray-400 hover:text-white transition-colors">历史</button>
+                <button class="text-gray-400 hover:text-white transition-colors">模型库</button>
+                <button class="text-gray-400 hover:text-white transition-colors">社区</button>
+            </div>
+            <div class="flex items-center gap-3">
+                <button class="w-9 h-9 rounded-full flex items-center justify-center text-gray-400 hover:bg-white/5 hover:text-white transition-colors">
+                    <i class="fa fa-moon-o"></i>
+                </button>
+                <button class="w-9 h-9 rounded-full flex items-center justify-center text-gray-400 hover:bg-white/5 hover:text-white transition-colors relative">
+                    <i class="fa fa-bell-o"></i>
+                    <span class="absolute top-1 right-1 w-2 h-2 rounded-full bg-pink-500"></span>
+                </button>
+                <div class="w-9 h-9 rounded-full bg-gradient-to-br from-primary to-pink-500 flex items-center justify-center font-medium text-sm">
+                    U
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主创作区 -->
+    <main class="max-w-[1800px] mx-auto p-4 md:p-6 pb-24 md:pb-6">
+        <div class="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-6">
+            <!-- 左侧预览区 (大) -->
+            <div class="space-y-6">
+                <!-- 预览画布 -->
+                <div class="rounded-2xl overflow-hidden bg-dark-900 border border-white/5 aspect-[4/3] md:aspect-auto md:min-h-[600px] relative group gradient-border">
+                    <div class="absolute inset-0 flex items-center justify-center">
+                        <div class="text-center">
+                            <div class="w-20 h-20 rounded-2xl bg-dark-800 flex items-center justify-center text-3xl text-primary mx-auto mb-4">
+                                <i class="fa fa-image"></i>
+                            </div>
+                            <h3 class="text-lg font-medium mb-2">开始创作你的作品</h3>
+                            <p class="text-gray-400 text-sm max-w-xs mx-auto">在右侧配置参数，点击生成按钮即可开始创作</p>
+                        </div>
+                    </div>
+                    <!-- 生成中状态 (示例) -->
+                    <!-- <div class="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                        <div class="text-center">
+                            <div class="w-16 h-16 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                            <h3 class="text-lg font-medium mb-1">生成中...</h3>
+                            <p class="text-gray-400 text-sm">预计剩余 45 秒 · 62%</p>
+                        </div>
+                    </div> -->
+
+                    <!-- 预览工具栏 -->
+                    <div class="absolute top-4 right-4 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button class="w-9 h-9 rounded-lg glass border border-white/10 flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10">
+                            <i class="fa fa-download"></i>
+                        </button>
+                        <button class="w-9 h-9 rounded-lg glass border border-white/10 flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10">
+                            <i class="fa fa-expand"></i>
+                        </button>
+                        <button class="w-9 h-9 rounded-lg glass border border-white/10 flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10">
+                            <i class="fa fa-refresh"></i>
+                        </button>
+                    </div>
+
+                    <!-- 底部参数条 -->
+                    <div class="absolute bottom-4 left-4 right-4 glass rounded-xl border border-white/10 p-3 flex items-center justify-between">
+                        <div class="flex gap-3 text-xs text-gray-300">
+                            <span>832 × 1216</span>
+                            <span>·</span>
+                            <span>30步</span>
+                            <span>·</span>
+                            <span>CFG 7</span>
+                            <span>·</span>
+                            <span>Seed: 42891</span>
+                        </div>
+                        <div class="flex gap-2">
+                            <button class="h-8 px-3 rounded-lg bg-white/10 text-white text-xs hover:bg-white/20">
+                                <i class="fa fa-random mr-1"></i> 随机种子
+                            </button>
+                            <button class="h-8 px-3 rounded-lg bg-white/10 text-white text-xs hover:bg-white/20">
+                                <i class="fa fa-clone mr-1"></i> 复用参数
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 快速提示词栏 -->
+                <div class="rounded-xl bg-dark-900 border border-white/5 p-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="text-sm font-medium">风格预设</h3>
+                        <button class="text-xs text-primary hover:text-primary/80">管理预设 <i class="fa fa-angle-right ml-1"></i></button>
+                    </div>
+                    <div class="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+                        <button class="h-8 px-4 rounded-full bg-primary/20 text-primary text-xs font-medium flex-shrink-0 border border-primary/30">赛博朋克</button>
+                        <button class="h-8 px-4 rounded-full bg-dark-800 text-gray-300 text-xs hover:bg-dark-700 flex-shrink-0">古风</button>
+                        <button class="h-8 px-4 rounded-full bg-dark-800 text-gray-300 text-xs hover:bg-dark-700 flex-shrink-0">二次元</button>
+                        <button class="h-8 px-4 rounded-full bg-dark-800 text-gray-300 text-xs hover:bg-dark-700 flex-shrink-0">写实摄影</button>
+                        <button class="h-8 px-4 rounded-full bg-dark-800 text-gray-300 text-xs hover:bg-dark-700 flex-shrink-0">油画风格</button>
+                        <button class="h-8 px-4 rounded-full bg-dark-800 text-gray-300 text-xs hover:bg-dark-700 flex-shrink-0">水彩风格</button>
+                        <button class="h-8 px-4 rounded-full bg-dark-800 text-gray-300 text-xs hover:bg-dark-700 flex-shrink-0">3D渲染</button>
+                        <button class="h-8 px-4 rounded-full bg-dark-800 text-gray-300 text-xs hover:bg-dark-700 flex-shrink-0">像素风</button>
+                    </div>
+                </div>
+
+                <!-- 历史版本缩略图 -->
+                <div class="rounded-xl bg-dark-900 border border-white/5 p-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="text-sm font-medium">最近生成</h3>
+                        <button class="text-xs text-gray-400 hover:text-white">查看全部 <i class="fa fa-angle-right ml-1"></i></button>
+                    </div>
+                    <div class="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
+                        <div class="aspect-square rounded-lg overflow-hidden border-2 border-primary cursor-pointer">
+                            <img src="https://picsum.photos/seed/c1/200/200" class="w-full h-full object-cover">
+                        </div>
+                        <div class="aspect-square rounded-lg overflow-hidden border border-transparent hover:border-white/20 cursor-pointer opacity-70 hover:opacity-100">
+                            <img src="https://picsum.photos/seed/c2/200/200" class="w-full h-full object-cover">
+                        </div>
+                        <div class="aspect-square rounded-lg overflow-hidden border border-transparent hover:border-white/20 cursor-pointer opacity-70 hover:opacity-100">
+                            <img src="https://picsum.photos/seed/c3/200/200" class="w-full h-full object-cover">
+                        </div>
+                        <div class="aspect-square rounded-lg overflow-hidden border border-transparent hover:border-white/20 cursor-pointer opacity-70 hover:opacity-100">
+                            <img src="https://picsum.photos/seed/c4/200/200" class="w-full h-full object-cover">
+                        </div>
+                        <div class="aspect-square rounded-lg overflow-hidden border border-transparent hover:border-white/20 cursor-pointer opacity-70 hover:opacity-100">
+                            <img src="https://picsum.photos/seed/c5/200/200" class="w-full h-full object-cover">
+                        </div>
+                        <div class="aspect-square rounded-lg overflow-hidden border border-transparent hover:border-white/20 cursor-pointer opacity-70 hover:opacity-100 hidden md:block">
+                            <img src="https://picsum.photos/seed/c6/200/200" class="w-full h-full object-cover">
+                        </div>
+                        <div class="aspect-square rounded-lg overflow-hidden border border-transparent hover:border-white/20 cursor-pointer opacity-70 hover:opacity-100 hidden lg:block">
+                            <img src="https://picsum.photos/seed/c7/200/200" class="w-full h-full object-cover">
+                        </div>
+                        <div class="aspect-square rounded-lg overflow-hidden border border-transparent hover:border-white/20 cursor-pointer opacity-70 hover:opacity-100 hidden lg:block">
+                            <img src="https://picsum.photos/seed/c8/200/200" class="w-full h-full object-cover">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右侧参数面板 -->
+            <div class="space-y-4">
+                <div class="rounded-xl bg-dark-900 border border-white/5 p-5">
+                    <h3 class="text-base font-bold mb-4 flex items-center gap-2">
+                        <i class="fa fa-sliders text-primary"></i>
+                        生成参数
+                    </h3>
+
+                    <div class="space-y-5">
+                        <div>
+                            <label class="block text-sm font-medium mb-2 text-gray-300">工作流</label>
+                            <select class="w-full h-11 px-4 rounded-lg bg-dark-800 border border-white/10 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 text-white">
+                                <option>✨ 文字生图 (RealVisXL)</option>
+                                <option>🎨 图生图</option>
+                                <option>💃 动作迁移</option>
+                                <option>🖼️ 图片超分</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2 text-gray-300">正向提示词</label>
+                            <textarea class="w-full min-h-[120px] p-4 rounded-lg bg-dark-800 border border-white/10 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 text-white resize-y" placeholder="描述你想要的画面...">masterpiece, best quality, 1girl, cyberpunk style, neon lights, rain, futuristic city, detailed face, cinematic lighting</textarea>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2 text-gray-300">负向提示词</label>
+                            <textarea class="w-full h-20 p-4 rounded-lg bg-dark-800 border border-white/10 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 text-white resize-none" placeholder="描述你不想要的内容...">ugly, deformed, blurry, bad anatomy, low quality, watermark</textarea>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-2 text-gray-300">尺寸</label>
+                                <select class="w-full h-11 px-4 rounded-lg bg-dark-800 border border-white/10 text-sm outline-none focus:border-primary text-white">
+                                    <option>832 × 1216 (竖版)</option>
+                                    <option>1024 × 1024 (方形)</option>
+                                    <option>1216 × 832 (横版)</option>
+                                    <option>1536 × 1024 (宽屏)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-2 text-gray-300">生成数量</label>
+                                <select class="w-full h-11 px-4 rounded-lg bg-dark-800 border border-white/10 text-sm outline-none focus:border-primary text-white">
+                                    <option>1张</option>
+                                    <option>2张</option>
+                                    <option>4张</option>
+                                    <option>批量模式</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <label class="text-sm font-medium text-gray-300">采样步数: <span class="text-primary">30</span></label>
+                            </div>
+                            <input type="range" min="10" max="50" value="30" class="w-full accent-primary">
+                        </div>
+
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <label class="text-sm font-medium text-gray-300">CFG Scale: <span class="text-primary">7</span></label>
+                            </div>
+                            <input type="range" min="1" max="20" step="0.5" value="7" class="w-full accent-primary">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="rounded-xl bg-dark-900 border border-white/5 p-4">
+                    <button class="w-full h-14 rounded-xl bg-gradient-to-r from-primary to-pink-500 text-white font-bold text-base hover:opacity-90 transition-opacity relative overflow-hidden group">
+                        <span class="relative z-10 flex items-center justify-center gap-2">
+                            <i class="fa fa-magic"></i>
+                            开始生成
+                        </span>
+                        <div class="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform"></div>
+                    </button>
+                    <p class="text-center text-xs text-gray-500 mt-2">预计消耗 8 积分 · 等待 1-2 分钟</p>
+                </div>
+
+                <div class="rounded-xl bg-dark-900 border border-white/5 p-4">
+                    <h3 class="text-sm font-medium mb-3 flex items-center gap-2">
+                        <i class="fa fa-plug text-primary"></i>
+                        高级功能
+                    </h3>
+                    <div class="space-y-3">
+                        <label class="flex items-center justify-between p-3 rounded-lg bg-dark-800 hover:bg-dark-700 cursor-pointer">
+                            <div>
+                                <div class="text-sm font-medium">高清修复</div>
+                                <div class="text-xs text-gray-400">放大2倍并修复细节</div>
+                            </div>
+                            <div class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer" checked>
+                                <div class="w-11 h-6 bg-dark-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+                            </div>
+                        </label>
+                        <label class="flex items-center justify-between p-3 rounded-lg bg-dark-800 hover:bg-dark-700 cursor-pointer">
+                            <div>
+                                <div class="text-sm font-medium">面部修复</div>
+                                <div class="text-xs text-gray-400">自动优化人脸细节</div>
+                            </div>
+                            <div class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" class="sr-only peer">
+                                <div class="w-11 h-6 bg-dark-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 移动端底部导航 -->
+    <nav class="fixed bottom-0 left-0 right-0 glass border-t border-white/5 safe-bottom z-30 lg:hidden">
+        <div class="grid grid-cols-4 h-16">
+            <button class="flex flex-col items-center justify-center gap-1 text-primary">
+                <i class="fa fa-paint-brush text-lg"></i>
+                <span class="text-xs font-medium">创作</span>
+            </button>
+            <button class="flex flex-col items-center justify-center gap-1 text-gray-400">
+                <i class="fa fa-history text-lg"></i>
+                <span class="text-xs">历史</span>
+            </button>
+            <button class="flex flex-col items-center justify-center gap-1 text-gray-400">
+                <i class="fa fa-bookmark-o text-lg"></i>
+                <span class="text-xs">模型</span>
+            </button>
+            <button class="flex flex-col items-center justify-center gap-1 text-gray-400">
+                <i class="fa fa-user-o text-lg"></i>
+                <span class="text-xs">我的</span>
+            </button>
+        </div>
+    </nav>
+
+    <!-- 移动端悬浮生成按钮 -->
+    <button class="fixed bottom-20 right-4 w-14 h-14 rounded-full bg-gradient-to-r from-primary to-pink-500 text-white shadow-lg flex items-center justify-center text-xl z-20 lg:hidden">
+        <i class="fa fa-magic"></i>
+    </button>
+</body>
+</html>

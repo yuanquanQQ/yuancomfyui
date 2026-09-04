@@ -55,6 +55,13 @@ installer/stage/
 # Local document QA renders
 docs/requirement_report_render/
 
+# One-off diagnostic exports (comfy diag, download diagnostics)
+docs/*/comfy_diag.json
+docs/*/config.json
+docs/*/download_diagnostic.json
+docs/*/*.tmp
+/.ssh_known_hosts_test
+
 # License service secrets and generated administrator builds
 server/backups/
 server/secrets/
