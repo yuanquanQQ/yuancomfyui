@@ -25,7 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from license_client import LicenseError, LicenseManager
-from runninghub_client.browser import BrowserRunner
+from runninghub_client.browser import BrowserRunner, LoginExpiredError
 from runninghub_client.workflow_specs import workflow_spec_from_dict
 
 logging.basicConfig(
@@ -633,6 +633,23 @@ def _session_info(state_path: Path) -> dict:
         expires = float(token.get("expires", -1))
     except (TypeError, ValueError):
         expires = -1
+    # RunningHub re-stamps the auth cookie's ``expires`` attribute to the next
+    # silent-refresh time, so a freshly saved state.json can show a *past*
+    # attribute while the JWT itself remains valid for days.  Trust the JWT
+    # ``exp`` claim when present; fall back to the cookie attribute.
+    jwt_exp = 0.0
+    try:
+        import base64
+        seg = str(token.get("value", "")).split(".")[1]
+        seg += "=" * (-len(seg) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(seg))
+        candidate = float(payload.get("exp", 0))
+        if 0 < candidate <= 1e12:
+            jwt_exp = candidate
+    except (IndexError, ValueError, TypeError, KeyError):
+        jwt_exp = 0.0
+    if jwt_exp:
+        expires = jwt_exp
     expired = expires > 0 and expires <= time.time()
     return {
         "valid": not expired,
@@ -1232,7 +1249,61 @@ def _run_task(task_id: str, account: str) -> dict:
             if _tasks.get(task_id, {}).get("cancel_requested"):
                 return {"status": "cancelled", "error": "任务已取消"}
         logger.exception("[%s] Failed on account=%s", task_id, account)
-        return {"status": "failed", "error": str(exc)}
+        result = {"status": "failed", "error": str(exc)}
+        if isinstance(exc, LoginExpiredError) or _is_auth_rejection_text(str(exc)):
+            result["login_expired"] = True
+        return result
+
+
+def _is_auth_rejection_text(error_text: str) -> bool:
+    folded = str(error_text or "").casefold()
+    return any(pattern in folded for pattern in (
+        "no auth data provided",
+        "token_mission",
+        "token_missing",
+        "登录态已失效",
+    ))
+
+
+def _mark_account_session_expired(account: str) -> None:
+    """Shorten the saved session so a revoked account stops being dispatched.
+
+    RunningHub can revoke a session server-side while state.json still
+    claims a far-future expiry.  After an authoritative 401/403 we force the
+    stored cookie expiry into the past so ``/api/accounts`` reports the
+    account as expired and the user is prompted to log in again.
+    """
+    if not account:
+        return
+    state_path = PROFILES / account / "state.json"
+    data = _read_json(state_path, None)
+    if not isinstance(data, dict):
+        return
+    cookies = data.get("cookies")
+    if not isinstance(cookies, list):
+        return
+    past = time.time() - 1.0
+    changed = False
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            continue
+        if cookie.get("name") == "Rh-Accesstoken":
+            # _session_info trusts the JWT exp when decodable; destroy the
+            # value so the revocation cannot be undone by that fallback.
+            cookie["value"] = "revoked"
+        try:
+            expires = float(cookie.get("expires", -1))
+        except (TypeError, ValueError):
+            expires = -1
+        if expires > 0 and expires > past:
+            cookie["expires"] = past
+            changed = True
+    if changed:
+        _write_json(state_path, data)
+        logger.warning(
+            "Account %s marked as expired after a server-side auth rejection",
+            account,
+        )
 
 
 def _automatic_retry_reason(error_text: str) -> str | None:
@@ -1242,6 +1313,10 @@ def _automatic_retry_reason(error_text: str) -> str | None:
     if ("任务已取消" in text or "用户取消" in text
             or "task was cancelled" in folded
             or "task was canceled" in folded):
+        return None
+    if _is_auth_rejection_text(text):
+        # A revoked login is only fixed by logging in again; requeuing just
+        # burns the account slot and confuses the user.
         return None
     if ("超时" in text or "timeout" in folded):
         return "任务超时"
@@ -1270,6 +1345,11 @@ def _finish_task(task_id: str, account: str, future: Future):
                 _automatic_retry_reason(error_text)
                 if result_status == "failed" else None
             )
+            if (result_status == "failed"
+                    and (result.get("login_expired")
+                         or _is_auth_rejection_text(error_text))):
+                retry_reason = None
+                _mark_account_session_expired(account)
             retry_count = int(task.get("retry_count") or 0)
             if retry_reason and retry_count < MAX_TASK_REQUEUES:
                 attempt_errors = list(task.get("attempt_errors") or ())

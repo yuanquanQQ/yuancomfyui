@@ -16,6 +16,92 @@ from .workflow_specs import OutputSpec, WorkflowSpec
 
 logger = logging.getLogger(__name__)
 
+
+class LoginExpiredError(RuntimeError):
+    """RunningHub rejected the saved browser session server-side (401/403).
+
+    Raising this distinct type lets the task layer skip pointless retries
+    and mark the account as needing a fresh login instead of silently
+    re-queuing the same auth failure.
+    """
+
+
+# RunningHub returns literal "TOKEN_MISSION" (sic) and "No auth data
+# provided" when a browser session was revoked server-side.
+_AUTH_REJECTION_PATTERNS = (
+    "no auth data provided",
+    "token_mission",
+    "token_missing",
+)
+
+
+def _is_auth_rejection_text(text) -> bool:
+    folded = str(text or "").casefold()
+    return any(pattern in folded for pattern in _AUTH_REJECTION_PATTERNS)
+
+
+# Popup text that the sweep must never close: completion and error dialogs
+# are authoritative signals consumed by the polling / failure logic.
+_POPUP_SWEEP_PROTECTED = (
+    "显示报告", "show report",
+    "错误", "失败", "异常", "不足",
+    "error", "failed", "failure", "exception", "insufficient",
+)
+
+_POPUP_SWEEP_JS = r"""
+    (protectedMarkers) => {
+        const visible = (el) => {
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && Number(style.opacity || 1) > 0
+                && rect.width > 0 && rect.height > 0;
+        };
+        const prot = (protectedMarkers || []).map((m) => String(m).toLowerCase());
+        const popupSelector = '[role="dialog"], [role="alertdialog"], '
+            + '.ant-modal-wrap, .ant-modal-content, .ant-popup, '
+            + '.ant-notification-notice, .comfy-modal, .p-dialog, '
+            + '[class*="modal"], [class*="Modal"], [class*="dialog"], '
+            + '[class*="Dialog"], [class*="notice"]';
+                const dismissText = /^(关闭|close|×|x|知道了!?|我知道了|跳过(广告)?|暂不(查看|处理|使用)?|不再提示|不再显示|以后再说|下次再说|忽略|ignore|dismiss|skip)$/i;
+        let closed = 0;
+        for (let round = 0; round < 6; round++) {
+            let closedThisRound = 0;
+            for (const popup of document.querySelectorAll(popupSelector)) {
+                if (!visible(popup)) continue;
+                const text = (popup.textContent || '').replace(/\s+/g, ' ');
+                const folded = text.toLowerCase();
+                if (prot.some((m) => folded.includes(m))) continue;
+                for (const btn of popup.querySelectorAll(
+                    'button, a, [role="button"], span, svg'
+                )) {
+                    const label = (btn.textContent || '')
+                        .replace(/\s+/g, ' ').trim();
+                    let cls = '';
+                    try {
+                        cls = String(btn.className.baseVal !== undefined
+                            ? btn.className.baseVal : (btn.className || ''));
+                    } catch (_) { cls = ''; }
+                    const aria = String(
+                        btn.getAttribute && btn.getAttribute('aria-label') || '');
+                    const isDismiss = /close|dismiss/i.test(cls)
+                        || /关闭|close/i.test(aria)
+                        || dismissText.test(label);
+                    if (!isDismiss) continue;
+                    if (!visible(btn) && !/ant-modal-close/.test(cls)) continue;
+                    btn.click();
+                    closed += 1;
+                    closedThisRound += 1;
+                    break;
+                }
+            }
+            if (!closedThisRound) break;
+        }
+        return closed;
+    }
+"""
+
 USER_DATA_DIR = Path("./profiles/default")
 
 # Serialize upload + workflow-start across all BrowserRunner instances so
@@ -581,6 +667,14 @@ class BrowserRunner:
             logger.error("Failure screenshot saved to %s", ss_path)
         except Exception as diag_exc:
             logger.error("Diagnostic save failed: %s", diag_exc)
+        # A revoked session makes the ComfyUI iframe never become ready.
+        # Confirm with an authenticated probe before blaming the login, so a
+        # genuinely slow canvas load still reports as a plain timeout.
+        if self._live_auth_revoked():
+            raise LoginExpiredError(
+                "RunningHub 登录态已失效（页面接口返回未授权），"
+                "ComfyUI 无法加载，请重新登录该账号后再试"
+            )
         raise RuntimeError("ComfyUI iframe not ready after 60s")
 
     def stop(self):
@@ -645,6 +739,29 @@ class BrowserRunner:
             raise RuntimeError("Browser page is not available (task may have ended)")
         return self._page.screenshot(type="png", full_page=False)
 
+    def _live_auth_revoked(self) -> bool:
+        """True when an authenticated RunningHub API rejects this session.
+
+        Short-lived media URLs return 401 even for live sessions, so every
+        auth-flavoured HTTP failure is confirmed with this live probe before
+        being classified as a revoked login (which must skip retries and
+        mark the account for re-login instead).
+        """
+        if not self._page:
+            return False
+        try:
+            probe = self._page.request.get(
+                "https://www.runninghub.cn/api/comfyui/tasks", timeout=15000)
+        except Exception as exc:
+            logger.debug("Session revocation probe failed: %s", str(exc)[:120])
+            return False
+        if probe.status in (401, 403):
+            return True
+        try:
+            return _is_auth_rejection_text(probe.text()[:500])
+        except Exception:
+            return False
+
     def _load_state(self):
         f = self.user_data_dir / "state.json"
         if f.exists():
@@ -669,6 +786,18 @@ class BrowserRunner:
         if not state:
             return
         cookies = state.get("cookies") or []
+
+        def _jwt_expiry(value):
+            """Return the JWT exp (unix seconds) if decodable and in future."""
+            try:
+                seg = str(value).split(".")[1]
+                seg += "=" * (-len(seg) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(seg))
+                exp = float(payload.get("exp", 0))
+            except (IndexError, ValueError, TypeError, KeyError):
+                return 0.0
+            return exp if exp and exp <= 1e12 and exp > time.time() else 0.0
+
         if cookies:
             try:
                 # Playwright requires cookie.expires to be float seconds; for
@@ -688,6 +817,15 @@ class BrowserRunner:
                         item["expires"] = float(c.get("expires", -1))
                     except (TypeError, ValueError):
                         item["expires"] = -1
+                    # RunningHub re-stamps auth cookie ``expires`` to the next
+                    # silent-refresh moment, so a saved state.json often holds
+                    # cookies whose attribute is already in the past even
+                    # though the JWT itself is valid for 30 days.  Chromium
+                    # drops expired cookies on add_cookies(), which would strip
+                    # the login entirely; restore the real JWT lifetime.
+                    if 0 < item["expires"] <= time.time():
+                        recovered = _jwt_expiry(item["value"])
+                        item["expires"] = recovered if recovered else time.time() + 86400
                     if "url" in c and c["url"]:
                         item["url"] = c["url"]
                     cleaned.append(item)
@@ -1192,6 +1330,7 @@ class BrowserRunner:
         raw = fp.read_bytes()
         data = None
         last_error = None
+        auth_rejected = False
 
         # Use Playwright's APIRequestContext — shares cookies with browser
         for field_name, endpoint_path in upload_targets:
@@ -1212,6 +1351,15 @@ class BrowserRunner:
                         response.text()[:200],
                     )
                     if response.status != 200:
+                        if response.status in (401, 403) or _is_auth_rejection_text(
+                                response.text()):
+                            # Retrying cannot fix a revoked session.
+                            auth_rejected = True
+                            last_error = RuntimeError(
+                                f"Upload HTTP {response.status}: "
+                                f"{response.text()[:200]}"
+                            )
+                            break
                         raise RuntimeError(
                             f"Upload HTTP {response.status}: "
                             f"{response.text()[:200]}"
@@ -1226,9 +1374,14 @@ class BrowserRunner:
                     )
                     if request_attempt < 3:
                         self._page.wait_for_timeout(1000 * request_attempt)
-            if data is not None:
+            if data is not None or auth_rejected:
                 break
         if data is None:
+            if auth_rejected and self._live_auth_revoked():
+                raise LoginExpiredError(
+                    "RunningHub 登录态已失效（上传接口返回未授权），"
+                    "请重新登录该账号后再试"
+                ) from last_error
             raise RuntimeError("All direct upload endpoints failed") from last_error
 
         if isinstance(data, str):
@@ -1916,7 +2069,7 @@ class BrowserRunner:
                     # event listeners that re-fire on synthetic click().
                     self._page.wait_for_timeout(5000)
                     # Mark this page as having been submitted so a follow-up
-                    # accidental click in wait_for_completion loop is a no-op.
+                    # accidental click in the polling loop is a no-op.
                     self._run_submitted = True
                     return True
                 # Remember the most informative state for the post-mortem dump
@@ -2239,6 +2392,25 @@ class BrowserRunner:
                 return True
         return False
 
+    def _all_outputs_have_results(self, baseline, current):
+        """Return True when every configured output node gained new media.
+
+        A non-empty ``app.nodeOutputs`` entry for an output node means that
+        node finished and holds a savable object; the run can then be saved
+        immediately without waiting for the final report popup.
+        """
+        if not self.workflow_spec or not self.workflow_spec.outputs:
+            return False
+        baseline = baseline or {}
+        current = current or {}
+        for output in self.workflow_spec.outputs:
+            node_id = str(output.node_id)
+            values = set(current.get(node_id) or [])
+            old_values = set(baseline.get(node_id) or [])
+            if not (values - old_values):
+                return False
+        return True
+
     def _current_task_list_state(self):
         """Return the status of the newest visible RunningHub task-list item.
 
@@ -2312,30 +2484,6 @@ class BrowserRunner:
             return now, False
         return first_seen_at, now - first_seen_at >= grace_seconds
 
-    def wait_for_completion(self, timeout=600, poll_interval=2):
-        timeout_text = f"{timeout}s" if timeout and timeout > 0 else "unlimited"
-        logger.info("Waiting for visible final report popup (timeout=%s)...",
-                    timeout_text)
-        start = time.time()
-
-        while not timeout or timeout <= 0 or time.time() - start < timeout:
-            elapsed = time.time() - start
-            if int(elapsed) % 30 < poll_interval:
-                logger.info("Waiting... (%.0fs elapsed)", elapsed)
-
-            popup = self._visible_completion_popup()
-            if popup:
-                logger.info(
-                    "Visible final report popup detected in %s after %.0fs: %s",
-                    popup.get("scope"), elapsed, popup.get("text", "")[:200],
-                )
-                return "done"
-
-            time.sleep(poll_interval)
-
-        logger.error("Final report popup not detected within %ds", timeout)
-        return "timeout"
-
     def _dismiss_rife_popup(self):
         """Force-close any visible modal/dialog on the main page AND inside the ComfyUI iframe."""
         close_selectors = [
@@ -2387,6 +2535,36 @@ class BrowserRunner:
         except Exception:
             pass
         return False
+
+    def _sweep_visible_popups(self, note=""):
+        """Close every dismissible dialog before the next execution step.
+
+        Ad/notice/announcement popups that appear on page load or during
+        upload/run phases must be cleared first, otherwise they intercept
+        clicks and coordinates.  Completion and error dialogs are protected
+        (their text drives the polling logic) and are never closed here.
+        """
+        closed_total = 0
+        for scope_name, scope in (("main page", self._page),
+                                  ("ComfyUI iframe", self._comfy)):
+            if not scope:
+                continue
+            try:
+                closed = scope.evaluate(_POPUP_SWEEP_JS, _POPUP_SWEEP_PROTECTED)
+                closed = int(closed or 0)
+                if closed:
+                    logger.info("Popup sweep%s closed %d dialog(s) in %s",
+                                note, closed, scope_name)
+                    closed_total += closed
+            except Exception as exc:
+                logger.debug("Popup sweep failed in %s: %s",
+                             scope_name, str(exc)[:120])
+        if closed_total:
+            try:
+                self._page.wait_for_timeout(600)
+            except Exception:
+                pass
+        return closed_total
 
     def _dismiss_cancel_popups(self):
         """Click Cancel in every visible popup and keep watching for new ones.
@@ -2686,8 +2864,7 @@ class BrowserRunner:
 
     def _dismiss_comfy_popups(self):
         """Aggressively dismiss any dialog/popup inside the ComfyUI iframe.
-        Called after wait_for_completion() to ensure the iframe is clear
-        before attempting downloads."""
+        Called before downloads to ensure the iframe is clear."""
         if not self._comfy:
             return
         logger.info("Dismissing ComfyUI iframe popups...")
@@ -2855,6 +3032,8 @@ class BrowserRunner:
                         output.node_id, result,
                     )
                     return result
+            except LoginExpiredError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "Context menu download failed for node %s: %s",
@@ -2870,6 +3049,8 @@ class BrowserRunner:
                 media_saved = self._download_output_node_media(base_dir, output)
                 if media_saved:
                     saved.extend(media_saved)
+            except LoginExpiredError:
+                raise
             except Exception as exc:
                 logger.warning(
                     "Output node media fallback failed for node %s: %s",
@@ -2879,6 +3060,11 @@ class BrowserRunner:
             logger.info("Configured output node media downloads OK: %s", saved)
             return saved
         if self.workflow_spec.strict_outputs:
+            if self._live_auth_revoked():
+                raise LoginExpiredError(
+                    "RunningHub 登录态已失效（结果保存/下载被拒绝），"
+                    "请重新登录该账号后再试"
+                )
             raise RuntimeError(
                 "Configured output node download failed; refusing to save other nodes"
             )
@@ -2935,6 +3121,7 @@ class BrowserRunner:
 
         raise RuntimeError(
             "工作流已完成，但自动下载输出失败；任务已结束以释放账号，请查看浏览器或日志中的下载错误"
+            + ("（登录态已失效）" if self._live_auth_revoked() else "")
         )
 
     @staticmethod
@@ -3158,6 +3345,13 @@ class BrowserRunner:
                 const urls = [];
                 const outputData = (app.nodeOutputs && app.nodeOutputs[node.id])
                     || (app.nodeOutputs && app.nodeOutputs[String(node.id)]) || {};
+                const viewFor = (item) => {
+                    const url = new URL('/view', location.origin);
+                    url.searchParams.set('filename', item.filename);
+                    url.searchParams.set('subfolder', item.subfolder || '');
+                    url.searchParams.set('type', item.type || 'output');
+                    return url.href;
+                };
                 const loadedImages = [
                     ...(Array.isArray(node.imgs) ? node.imgs : []),
                     ...(Array.isArray(outputData.imgs) ? outputData.imgs : []),
@@ -3172,11 +3366,21 @@ class BrowserRunner:
                 ];
                 for (const item of imageMetadata) {
                     if (!item || !item.filename) continue;
-                    const url = new URL('/view', location.origin);
-                    url.searchParams.set('filename', item.filename);
-                    url.searchParams.set('subfolder', item.subfolder || '');
-                    url.searchParams.set('type', item.type || 'output');
-                    urls.push(url.href);
+                    // Prefer the public CDN URL (cos_url); the authenticated
+                    // /view proxy endpoint 401s when the browser session was
+                    // revoked server-side, while the CDN link still works.
+                    if (item.cos_url) urls.push(String(item.cos_url));
+                    urls.push(viewFor(item));
+                }
+                const videoMetadata = [
+                    ...(Array.isArray(node.videos) ? node.videos : []),
+                    ...(Array.isArray(outputData.videos) ? outputData.videos : []),
+                ];
+                for (const item of videoMetadata) {
+                    if (!item) continue;
+                    if (typeof item === 'string') { urls.push(item); continue; }
+                    if (item.cos_url) urls.push(String(item.cos_url));
+                    if (item.filename) urls.push(viewFor(item));
                 }
                 return [...new Set(urls)];
             }""",
@@ -3188,6 +3392,18 @@ class BrowserRunner:
             for request_attempt in range(1, 4):
                 try:
                     response = self._page.request.get(source, timeout=180000)
+                    if response.status in (401, 403):
+                        # /view can 401 on short-lived URLs even with a live
+                        # session; only blame the login when the browser's
+                        # authenticated APIs are also rejecting us.
+                        if self._live_auth_revoked():
+                            raise LoginExpiredError(
+                                "RunningHub 登录态已失效（结果下载接口返回 "
+                                f"{response.status}），请重新登录该账号后再试"
+                            )
+                        raise RuntimeError(
+                            f"media source rejected: status={response.status}"
+                        )
                     body = response.body()
                     content_type = (
                         response.headers.get("content-type") or ""
@@ -3233,6 +3449,8 @@ class BrowserRunner:
                     destination.write_bytes(body)
                     saved.append(str(destination))
                     break
+                except LoginExpiredError:
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Output media request failed for node %s (%d/3): %s",
@@ -3575,6 +3793,9 @@ class BrowserRunner:
             # Dismiss any notice/announcement modals that block the UI
             self._page.wait_for_timeout(1000)
             self._dismiss_stale_completion_popup()
+            # Close every leftover/announcement popup before touching the
+            # canvas, so they cannot cover upload nodes or intercept clicks.
+            self._sweep_visible_popups("before node setup")
 
             with _upload_lock:
                 self._raise_if_cancelled()
@@ -3588,21 +3809,14 @@ class BrowserRunner:
                 self.set_text_inputs(inputs)
             self._raise_if_cancelled()
 
-            # ── Dismiss any stale completion popup from a previous run ──
-            # If the browser session was reused or the page shows a leftover
-            # "显示报告" popup from the last workflow, the detection loop
-            # below would fire immediately and download old output files.
+            # Clear notice/announcement and leftover popups from a previous
+            # run so they cannot visually interfere with canvas or downloads.
             self._dismiss_comfy_popups()
             self._dismiss_popups()
-            # Verify no completion popup is already visible before we start
-            if self._visible_completion_popup():
-                logger.warning(
-                    "Stale completion popup detected before run — dismissing"
-                )
-                self._dismiss_comfy_popups()
-                self._dismiss_popups()
-                self._page.wait_for_timeout(2000)
 
+            # Snapshot output-node media before the run.  Completion is
+            # detected by *new* media on the configured output nodes, so the
+            # baseline must exist before the first click.
             output_media_baseline = self._output_media_fingerprints()
 
             # ── Run with retry on OOM errors ──
@@ -3627,6 +3841,9 @@ class BrowserRunner:
                 # Click the Lite/Plus run button (serialized via lock so
                 # only one task starts a workflow at a time)
                 with _upload_lock:
+                    # Uploads can trigger VIP/notice dialogs that would
+                    # swallow the run click; sweep before acting.
+                    self._sweep_visible_popups("before run click")
                     if not self.select_plus_mode():
                         raise RuntimeError("未找到 Plus 模式运行按钮")
 
@@ -3638,19 +3855,24 @@ class BrowserRunner:
                 self._page.mouse.click(10, 450)
                 self._page.wait_for_timeout(1000)
 
-                # Poll for completion or error popups.
-                # Guard: refuse to accept completion before a minimum elapsed
-                # time so a stale popup from a previous run is not mistaken for
-                # a freshly completed workflow.
-                min_run_seconds = self.workflow_spec.completion.minimum_run_seconds
+                # Poll for results or error popups.  Sole completion
+                # criterion: every configured output node holds newly
+                # generated media (a savable object exists), in which case
+                # we save immediately without waiting for a report popup.
                 poll_interval = 2
                 deadline = execution_started_at + execution_limit
                 failure_first_seen_at = None
                 queue_last_seen_at = None
                 last_task_state = None
+                last_popup_sweep = time.monotonic()
                 while time.monotonic() < deadline or last_task_state == "queued":
                     self._raise_if_cancelled()
                     self._dismiss_cancel_popups()
+                    # Ads/notices can appear mid-run and cover save widgets
+                    # or previews; keep sweeping them away every ~15s.
+                    if time.monotonic() - last_popup_sweep >= 15:
+                        last_popup_sweep = time.monotonic()
+                        self._sweep_visible_popups(" during polling")
                     elapsed = time.monotonic() - execution_started_at
                     if int(elapsed) % 30 < poll_interval:
                         detail = (
@@ -3659,25 +3881,29 @@ class BrowserRunner:
                         )
                         self._report_progress("running_workflow", detail)
 
-                    # Check for success (completion popup)
-                    if self._visible_completion_popup():
-                        if elapsed < min_run_seconds:
-                            logger.warning(
-                                "Completion popup appeared after only %.0fs "
-                                "(minimum %ds) — dismissing as stale and "
-                                "continuing to wait",
-                                elapsed, min_run_seconds,
-                            )
-                            self._dismiss_comfy_popups()
-                            self._dismiss_popups()
-                            self._page.wait_for_timeout(2000)
-                            continue
+                    # Completion: newly generated savable media present on
+                    # every configured output node. The baseline captured
+                    # before the first click guarantees the media came from
+                    # this attempt, so no minimum-run guard is needed.
+                    live_output_media = self._output_media_fingerprints()
+                    if self._all_outputs_have_results(
+                            output_media_baseline, live_output_media):
+                        logger.info(
+                            "Configured output node(s) %s hold newly "
+                            "generated media after %.0fs — saving immediately",
+                            [o.node_id for o in self.workflow_spec.outputs],
+                            elapsed,
+                        )
+                        self._report_progress(
+                            "downloading",
+                            "输出节点已有可保存结果，立即保存",
+                        )
                         status = "done"
                         break
 
-                    # Completion is authoritative and must always be checked
-                    # before the task list: RunningHub can show "任务失败" in
-                    # the sidebar even after a workflow has completed.
+                    # Output presence must always be checked before the task
+                    # list: RunningHub can show "任务失败" in the sidebar even
+                    # after a workflow has completed.
                     task_list_state = self._current_task_list_state()
                     task_state = (task_list_state or {}).get("state")
                     last_task_state = task_state
@@ -3716,12 +3942,12 @@ class BrowserRunner:
                     if (failure_first_seen_at is not None
                             and previous_failure_seen_at is None):
                         logger.warning(
-                            "Task list shows failure; waiting for an "
-                            "authoritative Show Report popup",
+                            "Task list shows failure; checking the output "
+                            "nodes for newly generated results",
                         )
                         self._report_progress(
                             "running_workflow",
-                            "检测到任务状态异常，正在确认工作流是否已经完成",
+                            "检测到任务状态异常，正在确认输出节点是否已有结果",
                         )
                     if failure_confirmed:
                         current_output_media = self._output_media_fingerprints()
@@ -3807,16 +4033,38 @@ class BrowserRunner:
             if status != "done":
                 raise TimeoutError(
                     f"任务运行超时（{execution_limit} 秒），"
-                    '未检测到带"显示报告/Show Report"的完成弹窗'
+                    "目标输出节点未生成可保存的新结果"
                 )
 
             # Dismiss any ComfyUI iframe popups before downloading
             self._report_progress("downloading", "工作流完成，正在下载结果")
             self._dismiss_comfy_popups()
+            self._sweep_visible_popups("before download")
             self._page.wait_for_timeout(3000)
 
             self._raise_if_cancelled()
             files = self.download_outputs(output_dir)
+
+            # The savable result is now on local disk.  Terminate the
+            # RunningHub task immediately instead of letting it run on to
+            # the report popup, so the account releases its slot at once.
+            # Best effort: never fail the task because cancellation broke.
+            self._report_progress(
+                "cancelling", "结果已保存，正在取消任务以释放资源"
+            )
+            try:
+                cancel_result = self._cancel_runninghub_task_from_sidebar()
+                logger.info(
+                    "Post-save RunningHub task cancellation: %s", cancel_result
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Post-save RunningHub task cancellation failed: %s", exc
+                )
+            # Do not repeat the cloud cancellation if a manual cancel
+            # request arrives during the final unwind.
+            self._cloud_cancel_attempted = True
+
             self._report_progress("completed", "结果已保存")
             return files
         finally:
