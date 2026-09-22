@@ -159,6 +159,30 @@ class BrowserPostTests(unittest.TestCase):
 
         self.assertIsNone(self.runner._current_task_list_state())
 
+    def test_comfy_progress_reads_visible_percent(self):
+        comfy = mock.MagicMock()
+        comfy.evaluate.return_value = {
+            "percent": 37, "source": "text", "text": "37%"
+        }
+        self.runner._comfy = comfy
+
+        result = self.runner._current_comfy_progress()
+
+        self.assertEqual(37, result["percent"])
+        self.assertIn("app.progress", comfy.evaluate.call_args.args[0])
+
+    def test_stalled_progress_cancels_without_escaping_retry_loop(self):
+        self.runner._report_progress = mock.MagicMock()
+        self.runner._cancel_runninghub_task_from_sidebar = mock.MagicMock(
+            return_value=True
+        )
+
+        result = self.runner._cancel_for_retry("stalled")
+
+        self.assertTrue(result)
+        self.runner._cancel_runninghub_task_from_sidebar.assert_called_once_with()
+        self.runner._report_progress.assert_called_once_with("retrying", "stalled")
+
     def test_output_media_fingerprints_are_scoped_to_configured_outputs(self):
         self.runner.workflow_spec = WorkflowSpec(
             name="outputs",
@@ -173,6 +197,9 @@ class BrowserPostTests(unittest.TestCase):
 
         self.assertEqual({"149": ["https://example/output.png"]}, result)
         self.assertEqual(["149"], comfy.evaluate.call_args.args[1])
+        script = comfy.evaluate.call_args.args[0]
+        self.assertIn("outputData.gifs", script)
+        self.assertIn("outputData.outputs", script)
 
     def test_boolean_widget_is_set_on_configured_node(self):
         self.runner.workflow_spec = WorkflowSpec(

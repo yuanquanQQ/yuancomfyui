@@ -71,8 +71,8 @@ def _migrate_legacy_install_data(legacy_root: Path, target_root: Path) -> None:
         # A source-mode installer briefly used UserData without running the
         # frozen-build migration. It may therefore have created a fresh,
         # unactivated state before the older valid state was discovered. A
-        # valid signed receipt is more valuable than that empty state and must
-        # be recovered even when this source already has a migration marker.
+        # valid online credential is more valuable than that empty state and
+        # must be recovered even when this source already has a migration marker.
         source_license = legacy_root / ".license" / "license_state.json"
         target_license = target_root / ".license" / "license_state.json"
         try:
@@ -84,10 +84,12 @@ def _migrate_legacy_install_data(legacy_root: Path, target_root: Path) -> None:
         except (OSError, ValueError, TypeError):
             target_state = {}
         source_has_license = bool(
-            source_state.get("receipt") and source_state.get("public_key_pem")
+            source_state.get("license_id")
+            and source_state.get("refresh_token_protected")
         )
         target_has_license = bool(
-            target_state.get("receipt") and target_state.get("public_key_pem")
+            target_state.get("license_id")
+            and target_state.get("refresh_token_protected")
         )
         if source_has_license and not target_has_license:
             target_license.parent.mkdir(parents=True, exist_ok=True)
@@ -625,9 +627,28 @@ def _session_info(state_path: Path) -> dict:
     if not state_path.exists():
         return {"valid": False, "status": "missing", "expires_at": None}
     data = _read_json(state_path, {})
+    if data.get("session_revoked"):
+        return {"valid": False, "status": "expired", "expires_at": None}
+    local_storage = {
+        item.get("name"): item.get("value")
+        for origin in data.get("origins", [])
+        for item in origin.get("localStorage", [])
+        if isinstance(item, dict)
+    }
     token = next((c for c in data.get("cookies", [])
                   if c.get("name") == "Rh-Accesstoken"), None)
+    has_refresh_state = bool(local_storage.get("Rh-Refreshtoken"))
     if not token:
+        try:
+            session_expiry = float(local_storage.get("Rh-Expire-In", 0)) / 1000
+        except (TypeError, ValueError):
+            session_expiry = 0.0
+        if has_refresh_state:
+            return {
+                "valid": True,
+                "status": "refreshable",
+                "expires_at": session_expiry if session_expiry > time.time() else None,
+            }
         return {"valid": False, "status": "missing", "expires_at": None}
     try:
         expires = float(token.get("expires", -1))
@@ -648,9 +669,32 @@ def _session_info(state_path: Path) -> dict:
             jwt_exp = candidate
     except (IndexError, ValueError, TypeError, KeyError):
         jwt_exp = 0.0
+    local_expiries = []
+    for name in ("Rh-Expire-In", "Rh-Comfy-Expire-In"):
+        try:
+            candidate = float(local_storage.get(name, 0)) / 1000
+        except (TypeError, ValueError):
+            continue
+        if candidate > 0:
+            local_expiries.append(candidate)
     if jwt_exp:
         expires = jwt_exp
+    else:
+        # RunningHub also issues opaque access tokens.  For those tokens the
+        # cookie expiry is only the next silent-refresh checkpoint, while the
+        # actual session lifetime is persisted in localStorage.
+        if local_expiries:
+            # Prefer the broader account session lifetime over the shorter
+            # ComfyUI-specific refresh window.
+            expires = max(local_expiries)
     expired = expires > 0 and expires <= time.time()
+    if expired and has_refresh_state:
+        session_expiry = max(local_expiries, default=0.0)
+        return {
+            "valid": True,
+            "status": "refreshable",
+            "expires_at": session_expiry if session_expiry > time.time() else None,
+        }
     return {
         "valid": not expired,
         "status": "expired" if expired else "valid",
@@ -1269,9 +1313,9 @@ def _mark_account_session_expired(account: str) -> None:
     """Shorten the saved session so a revoked account stops being dispatched.
 
     RunningHub can revoke a session server-side while state.json still
-    claims a far-future expiry.  After an authoritative 401/403 we force the
-    stored cookie expiry into the past so ``/api/accounts`` reports the
-    account as expired and the user is prompted to log in again.
+    claims a far-future expiry.  Record that authoritative decision separately
+    from the browser-owned cookie and localStorage values.  A successful login
+    replaces state.json and therefore clears this marker.
     """
     if not account:
         return
@@ -1298,6 +1342,9 @@ def _mark_account_session_expired(account: str) -> None:
         if expires > 0 and expires > past:
             cookie["expires"] = past
             changed = True
+    if not data.get("session_revoked"):
+        data["session_revoked"] = True
+        changed = True
     if changed:
         _write_json(state_path, data)
         logger.warning(
@@ -1315,9 +1362,10 @@ def _automatic_retry_reason(error_text: str) -> str | None:
             or "task was canceled" in folded):
         return None
     if _is_auth_rejection_text(text):
-        # A revoked login is only fixed by logging in again; requeuing just
-        # burns the account slot and confuses the user.
-        return None
+        # The current account is unusable, but another ready account may be
+        # available.  _finish_task marks this account expired before the
+        # dispatcher selects the next retry target.
+        return "登录已过期，切换其他账号重试"
     if ("超时" in text or "timeout" in folded):
         return "任务超时"
     if any(phrase in folded for phrase in (
@@ -1348,7 +1396,6 @@ def _finish_task(task_id: str, account: str, future: Future):
             if (result_status == "failed"
                     and (result.get("login_expired")
                          or _is_auth_rejection_text(error_text))):
-                retry_reason = None
                 _mark_account_session_expired(account)
             retry_count = int(task.get("retry_count") or 0)
             if retry_reason and retry_count < MAX_TASK_REQUEUES:
@@ -1376,6 +1423,11 @@ def _finish_task(task_id: str, account: str, future: Future):
                     "files": [],
                     "error": None,
                 })
+                # A fixed account that just rejected authentication cannot
+                # succeed on retry. Let the dispatcher choose another ready
+                # account instead of leaving the task permanently queued.
+                if result.get("login_expired") or _is_auth_rejection_text(error_text):
+                    task["requested_account"] = "auto"
                 if task_id not in _task_queue:
                     _task_queue.append(task_id)
                 retry_scheduled = True

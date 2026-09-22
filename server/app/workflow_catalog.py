@@ -130,7 +130,11 @@ def output(node_id, media_type, *menu_actions):
 def input_field(key, label, media_type="image", input_type=None, *,
                 required=True, default=None, required_when=None,
                 minimum=None, maximum=None, step=None):
-    item = {"key": key, "label": label, "media_type": media_type}
+    item = {
+        "key": key,
+        "label": label,
+        "media_type": input_type or media_type,
+    }
     if input_type:
         item["input_type"] = input_type
     if not required:
@@ -270,6 +274,49 @@ WORKFLOW_CATALOG = [
                 "value_type": "integer", "default": 900,
             },
         ],
+        timeout=7200,
+    ),
+    workflow(
+        "ru_dance_motion_expression", "Ru摇+动作迁移+表情控制+消除泛黄【升级版】",
+        "动作迁移、表情控制并减少画面泛黄、脸型偏移和变色",
+        "video", "2099868007005769729", "reference_image",
+        [
+            input_field("motion_video", "视频输入", "video"),
+            input_field("reference_image", "图像输入"),
+            input_field(
+                "jitter", "抖动（节点 1009）",
+                input_type="number", default=0.2, minimum=0, step=0.01,
+            ),
+            input_field(
+                "custom_width", "自定义宽度（节点 966）",
+                input_type="integer", default=720, minimum=0, step=1,
+            ),
+            input_field(
+                "custom_height", "自定义高度（节点 967）",
+                input_type="integer", default=1280, minimum=0, step=1,
+            ),
+        ],
+        [
+            upload(
+                "motion_video", 413, "视频输入", "video",
+                "choose video to upload",
+            ),
+            upload("reference_image", 57, "图像输入"),
+        ],
+        [output(867, "video", "save video", "save preview")],
+        widgets=[{
+            "key": "jitter", "node_id": "1009",
+            "widget": "value", "label": "抖动",
+            "value_type": "number", "default": 0.2,
+        }, {
+            "key": "custom_width", "node_id": "966",
+            "widget": "value", "label": "自定义宽度",
+            "value_type": "integer", "default": 720,
+        }, {
+            "key": "custom_height", "node_id": "967",
+            "widget": "value", "label": "自定义高度",
+            "value_type": "integer", "default": 1280,
+        }],
         timeout=7200,
     ),
     workflow(
@@ -422,4 +469,4 @@ WORKFLOW_CATALOG = [
 ]
 
 def workflow_catalog_response() -> dict:
-    return {"version": 4, "default_workflow_key": DEFAULT_WORKFLOW_KEY, "workflows": WORKFLOW_CATALOG}
+    return {"version": 5, "default_workflow_key": DEFAULT_WORKFLOW_KEY, "workflows": WORKFLOW_CATALOG}

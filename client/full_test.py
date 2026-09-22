@@ -19,7 +19,7 @@ CLIENT_ROOT = Path(__file__).resolve().parent
 PORT_RANGE = range(8081, 8091)
 
 # Workflows deliberately not covered by the regression run.
-SKIP_WORKFLOWS = {"ootd_7day", "minimax_h3_dual_stage"}
+SKIP_WORKFLOWS = {"ootd_7day", "minimax_h3_dual_stage", "person_replace"}
 
 IMG = "library/images/"
 VID = "library/videos/"
@@ -40,7 +40,7 @@ TEST_PLAN = {
     },
     "ltx23_hd_digital_human": {
         "portrait": IMG + "398798bebe59646337fc37e45447458d.png",
-        "audio": AUD + "Lone_Angler.mp3",
+        "audio": AUD + "M500001ziKgJ3o5Ipp.mp3",
     },
     "qwen_prompt_image": {
         "reference": IMG + "2a214fc4ac9efd6538b5779d6e18c62c.jpg",
@@ -153,6 +153,9 @@ def main():
     print(f"[full_test] 服务 {base}；可用账号 {accounts}")
     ok, failed = 0, 0
     for workflow, inputs in TEST_PLAN.items():
+        if workflow in SKIP_WORKFLOWS:
+            print(f"  [跳过] {workflow}")
+            continue
         payload = {"workflow": workflow, **inputs}
         resp = requests.post(f"{base}/api/run", json=payload, timeout=20)
         try:

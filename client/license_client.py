@@ -10,11 +10,9 @@ import threading
 import time
 import uuid
 from ctypes import wintypes
-from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from cryptography.hazmat.primitives import serialization
 
 
 # Kept as compatibility constants for integrations that import them.  The
@@ -26,17 +24,6 @@ RETRY_INTERVAL_SECONDS = 60
 
 class LicenseError(ValueError):
     pass
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _parse_time(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _b64decode(value: str) -> bytes:
@@ -76,16 +63,30 @@ def _system_drive_serial() -> str:
 
 
 def machine_hash() -> str:
-    components = [
-        _windows_machine_guid(),
-        _system_drive_serial(),
-        platform.node(),
-        str(uuid.getnode()),
+    # MachineGuid identifies the Windows installation and does not change when
+    # a NIC, hostname, or drive volume metadata changes.  Those volatile fields
+    # are only fallbacks for non-standard environments where MachineGuid cannot
+    # be read.
+    machine_guid = _windows_machine_guid().strip().lower()
+    components = [machine_guid] if machine_guid else [
+        _system_drive_serial(), platform.node(), str(uuid.getnode())
     ]
     stable = "|".join(value.strip().lower() for value in components if value)
     if not stable:
         raise LicenseError("无法读取本机机器码")
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+
+def _machine_hash_from_legacy_receipt(receipt: str | None) -> str | None:
+    """Recover the previously bound hash; the server will validate it online."""
+    if not receipt:
+        return None
+    try:
+        encoded_body, _ = receipt.split(".", 1)
+        value = json.loads(_b64decode(encoded_body)).get("machine_hash")
+        return value if isinstance(value, str) and 16 <= len(value) <= 128 else None
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 
 class _DataBlob(ctypes.Structure):
@@ -164,8 +165,21 @@ class LicenseManager:
         self.lock = threading.RLock()
         self.last_attempt_at = 0.0
         self.state = self._read_state()
+        changed = False
         if not self.state.get("install_id"):
             self.state["install_id"] = uuid.uuid4().hex
+            changed = True
+        if not self.state.get("machine_hash"):
+            self.state["machine_hash"] = (
+                _machine_hash_from_legacy_receipt(self.state.get("receipt"))
+                or machine_hash()
+            )
+            changed = True
+        for legacy_key in ("receipt", "public_key_pem", "server_denied", "offline_until"):
+            if legacy_key in self.state:
+                self.state.pop(legacy_key)
+                changed = True
+        if changed:
             self._save_state()
 
     def _read_state(self) -> dict:
@@ -195,62 +209,18 @@ class LicenseManager:
             raise LicenseError(str(detail or f"授权服务器返回 {response.status_code}"))
         return response.json()
 
-    def _public_key(self) -> str:
-        existing = self.state.get("public_key_pem")
-        if existing:
-            return existing
-        result = self._request("GET", "/api/v1/license/public-key")
-        if result.get("algorithm") != "Ed25519" or not result.get("public_key_pem"):
-            raise LicenseError("授权服务器公钥无效")
-        return result["public_key_pem"]
-
-    def _verify_receipt(self, receipt: str, public_key_pem: str) -> dict:
-        try:
-            encoded_body, encoded_signature = receipt.split(".", 1)
-            body = _b64decode(encoded_body)
-            signature = _b64decode(encoded_signature)
-            public_key = serialization.load_pem_public_key(public_key_pem.encode("ascii"))
-            public_key.verify(signature, body)
-            payload = json.loads(body)
-        except Exception as exc:
-            raise LicenseError("授权签名验证失败") from exc
-        if payload.get("machine_hash") != machine_hash():
-            raise LicenseError("授权与当前机器不匹配")
-        if self.state.get("license_id") and payload.get("license_id") != self.state["license_id"]:
-            raise LicenseError("授权编号不匹配")
-        if payload.get("status") != "active":
-            raise LicenseError("授权当前不可用")
-        expires_at = _parse_time(payload.get("expires_at"))
-        if expires_at and expires_at <= _utcnow():
-            raise LicenseError("授权已到期")
-        offline_until = _parse_time(payload.get("offline_until"))
-        if not offline_until or offline_until <= _utcnow():
-            raise LicenseError("离线授权已超时，请连接授权服务器")
-        return payload
-
-    def _store_response(self, result: dict, public_key_pem: str | None = None):
-        key = public_key_pem or self.state.get("public_key_pem")
-        if not key:
-            raise LicenseError("缺少授权签名公钥")
-        previous_license_id = self.state.get("license_id")
-        self.state["license_id"] = result["license_id"]
-        try:
-            payload = self._verify_receipt(result["signed_receipt"], key)
-        except Exception:
-            if previous_license_id is None:
-                self.state.pop("license_id", None)
-            else:
-                self.state["license_id"] = previous_license_id
-            raise
+    def _store_response(self, result: dict):
+        if not result.get("license_id"):
+            raise LicenseError("授权服务器返回的数据无效")
+        for legacy_key in ("receipt", "public_key_pem", "server_denied", "offline_until"):
+            self.state.pop(legacy_key, None)
         self.state.update({
             "license_id": result["license_id"],
-            "receipt": result["signed_receipt"],
-            "public_key_pem": key,
             "last_check_at": time.time(),
             "last_error": None,
-            "server_denied": False,
-            "plan_type": payload.get("plan_type"),
-            "expires_at": payload.get("expires_at"),
+            "status": result.get("status"),
+            "plan_type": result.get("plan_type"),
+            "expires_at": result.get("expires_at"),
         })
         if result.get("refresh_token"):
             self.state["refresh_token_protected"] = _dpapi_protect(result["refresh_token"])
@@ -258,15 +228,14 @@ class LicenseManager:
 
     def activate(self, code: str) -> dict:
         with self.lock:
-            key = self._public_key()
             result = self._request("POST", "/api/v1/license/activate", {
                 "code": code,
-                "machine_hash": machine_hash(),
+                "machine_hash": self.state["machine_hash"],
                 "install_id": self.state["install_id"],
                 "device_label": platform.node() or "Windows PC",
                 "app_version": "1.0.0",
             })
-            self._store_response(result, key)
+            self._store_response(result)
             return self.status(check_online=False)
 
     def _check_online(self):
@@ -280,7 +249,7 @@ class LicenseManager:
         return {
             "license_id": self.state["license_id"],
             "refresh_token": _dpapi_unprotect(protected),
-            "machine_hash": machine_hash(),
+            "machine_hash": self.state["machine_hash"],
             "install_id": self.state["install_id"],
             "app_version": "1.0.0",
         }
@@ -303,7 +272,7 @@ class LicenseManager:
             result = self._request("POST", "/api/v1/license/renew", {
                 "license_id": self.state["license_id"],
                 "refresh_token": _dpapi_unprotect(protected),
-                "machine_hash": machine_hash(),
+                "machine_hash": self.state["machine_hash"],
                 "install_id": self.state["install_id"],
                 "app_version": "1.0.0",
                 "code": code,
@@ -321,71 +290,63 @@ class LicenseManager:
             except ConnectionError as exc:
                 self.state["last_error"] = str(exc)
             except LicenseError as exc:
-                self.state["server_denied"] = True
                 self.state["last_error"] = str(exc)
                 self._save_state()
                 return self._public_status(False, str(exc))
+            if self.state.get("last_error"):
+                self._save_state()
+                return self._public_status(False, self.state["last_error"], mode="online")
             return self.status(check_online=False)
 
     def reset(self) -> dict:
         """Clear server-issued credentials while preserving this installation."""
         with self.lock:
             install_id = self.state.get("install_id") or uuid.uuid4().hex
-            self.state = {"install_id": install_id}
+            stable_machine_hash = self.state.get("machine_hash") or machine_hash()
+            self.state = {
+                "install_id": install_id,
+                "machine_hash": stable_machine_hash,
+            }
             self.last_attempt_at = 0.0
             self._save_state()
             return self._public_status(False, "旧授权已清除，请输入新卡密激活")
 
     def status(self, check_online: bool = True) -> dict:
         with self.lock:
-            receipt = self.state.get("receipt")
-            key = self.state.get("public_key_pem")
-            if not receipt or not key:
+            if not self.state.get("license_id"):
                 return self._public_status(False, "未激活")
-            if self.state.get("server_denied"):
-                return self._public_status(False, self.state.get("last_error") or "授权不可用")
-            now = time.time()
-            # Every online status request is authoritative.  This keeps the
-            # normal client path and the manual "重新校验" action in sync;
-            # the signed receipt remains the offline fallback when the server
-            # cannot be reached.
             if check_online:
-                self.last_attempt_at = now
+                self.last_attempt_at = time.time()
                 try:
                     self._check_online()
                 except ConnectionError as exc:
                     self.state["last_error"] = str(exc)
+                    self._save_state()
+                    return self._public_status(False, str(exc), mode="online")
                 except LicenseError as exc:
-                    self.state["server_denied"] = True
                     self.state["last_error"] = str(exc)
                     self._save_state()
-                    return self._public_status(False, str(exc))
-                now = time.time()
-            receipt = self.state.get("receipt")
-            key = self.state.get("public_key_pem")
-            try:
-                payload = self._verify_receipt(receipt, key)
-            except LicenseError as exc:
-                return self._public_status(False, str(exc))
-            if self.state.get("last_error"):
-                mode = "offline"
-            elif now - float(self.state.get("last_check_at") or 0) < 90:
-                mode = "online"
-            else:
-                mode = "cached"
-            return self._public_status(True, "授权有效", payload, mode)
+                    return self._public_status(False, str(exc), mode="online")
+            active = self.state.get("status") == "active"
+            return self._public_status(
+                active,
+                "授权有效" if active else "授权不可用",
+                mode="online",
+            )
 
     def _public_status(self, active: bool, message: str, payload: dict | None = None,
                        mode: str = "inactive") -> dict:
         payload = payload or {}
+        license_id = self.state.get("license_id")
+        requires_activation = not license_id or "到期" in message
         return {
             "active": active,
             "message": message,
             "mode": mode,
-            "license_id": self.state.get("license_id"),
-            "machine_hash": machine_hash(),
+            "license_id": license_id,
+            "requires_activation": requires_activation,
+            "machine_hash": self.state.get("machine_hash") or machine_hash(),
             "plan_type": payload.get("plan_type") or self.state.get("plan_type"),
             "expires_at": payload.get("expires_at") or self.state.get("expires_at"),
-            "offline_until": payload.get("offline_until"),
             "server_url": self.server_url,
         }

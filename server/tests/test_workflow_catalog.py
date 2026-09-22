@@ -16,7 +16,7 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
     person_replace = by_key("person_replace")
     assert person_replace["inputs"][0] == {
         "key": "upload_background", "label": "上传替换背景",
-        "media_type": "image", "input_type": "boolean", "default": True,
+        "media_type": "boolean", "input_type": "boolean", "default": True,
     }
     assert person_replace["inputs"][1]["required"] is False
     assert person_replace["inputs"][1]["required_when"] == {
@@ -83,12 +83,12 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
     assert animate["inputs"][2:] == [
         {
             "key": "motion_strength", "label": "动作幅度（节点 266）",
-            "media_type": "image", "input_type": "number",
+            "media_type": "number", "input_type": "number",
             "default": 0.2, "min": 0, "step": 0.01,
         },
         {
             "key": "frame_load_cap", "label": "加载帧数上限（节点 422）",
-            "media_type": "image", "input_type": "integer",
+            "media_type": "integer", "input_type": "integer",
             "default": 900, "min": 1, "step": 1,
         },
     ]
@@ -104,6 +104,26 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
             "value_type": "integer", "default": 900,
         },
     ]
+    ru_dance = by_key("ru_dance_motion_expression")
+    assert ru_dance["inputs"][2] == {
+        "key": "jitter", "label": "抖动（节点 1009）",
+        "media_type": "number", "input_type": "number",
+        "default": 0.2, "min": 0, "step": 0.01,
+    }
+    assert [item["node_id"] for item in ru_dance["spec"]["uploads"]] == [
+        "413", "57",
+    ]
+    assert ru_dance["spec"]["widgets"] == [{
+        "key": "jitter", "node_id": "1009", "widget": "value",
+        "label": "抖动", "value_type": "number", "default": 0.2,
+    }, {
+        "key": "custom_width", "node_id": "966", "widget": "value",
+        "label": "自定义宽度", "value_type": "integer", "default": 720,
+    }, {
+        "key": "custom_height", "node_id": "967", "widget": "value",
+        "label": "自定义高度", "value_type": "integer", "default": 1280,
+    }]
+    assert ru_dance["spec"]["outputs"][0]["node_id"] == "867"
     detail_restore = by_key("hd_restore_detail_v2")
     assert detail_restore["name"] == "高定版高清修复【去AI感加细节】洗图"
     assert detail_restore["primary_input"] == "source"
@@ -152,7 +172,7 @@ def test_catalog_contains_server_owned_post_ids_and_corrected_outputs():
 
 
 def test_all_catalog_entries_have_runnable_server_configuration():
-    assert len(WORKFLOW_CATALOG) == 16
+    assert len(WORKFLOW_CATALOG) == 17
     assert not any(item["key"] == "qwen_tryon" for item in WORKFLOW_CATALOG)
     for item in WORKFLOW_CATALOG:
         assert item["post_id"].isdigit()
@@ -184,6 +204,7 @@ def test_frontend_workflow_descriptions():
 def test_catalog_post_mapping():
     expected = {
         "animate_transfer": "2087936157744189442",
+        "ru_dance_motion_expression": "2099868007005769729",
         "scail_multi_reference": "2087945522677108738",
         "qwen_multi_view": "2087934940880134146",
         "auto_storyboard_short_video": "2089754761372454913",

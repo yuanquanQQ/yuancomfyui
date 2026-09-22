@@ -98,6 +98,26 @@ def test_existing_license_replaces_fresh_unactivated_state_even_after_marker(tmp
     assert json.loads(target_path.read_text(encoding="utf-8")) == source_state
 
 
+def test_online_only_license_state_is_migrated_without_a_local_receipt(tmp_path: Path):
+    legacy = tmp_path / "old-install"
+    target = tmp_path / "new-install" / "UserData"
+    source_state = {
+        "install_id": "original-install",
+        "machine_hash": "stable-machine-hash",
+        "license_id": "license-1",
+        "refresh_token_protected": "dpapi:token",
+    }
+    (legacy / ".license").mkdir(parents=True)
+    (legacy / ".license" / "license_state.json").write_text(
+        json.dumps(source_state), encoding="utf-8"
+    )
+
+    server._migrate_legacy_install_data(legacy, target)
+
+    migrated = target / ".license" / "license_state.json"
+    assert json.loads(migrated.read_text(encoding="utf-8")) == source_state
+
+
 def test_runtime_layout_rebuilds_missing_directories_and_metadata(tmp_path: Path):
     root = tmp_path / "UserData"
 

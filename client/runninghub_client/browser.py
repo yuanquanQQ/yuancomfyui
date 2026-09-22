@@ -191,6 +191,7 @@ class BrowserRunner:
     """Playwright-based browser automation for RunningHub workflow."""
 
     TASK_FAILURE_GRACE_SECONDS = 60
+    ZERO_PROGRESS_TIMEOUT_SECONDS = 120
 
     def __init__(self, *, headless=True, slow_mo=300, user_data_dir=None,
                  workflow_url=None, workflow_id=None, post_id=None,
@@ -599,9 +600,7 @@ class BrowserRunner:
         self._page = self._context.new_page()
         self._raise_if_cancelled()
 
-        # Check login before navigating — if the session is expired,
-        # RunningHub shows a login page without the ComfyUI iframe.
-        if not self.ensure_logged_in():
+        if not self._restore_saved_login():
             raise RuntimeError("账号登录已失效，请重新登录")
 
         if self.post_id:
@@ -751,7 +750,10 @@ class BrowserRunner:
             return False
         try:
             probe = self._page.request.get(
-                "https://www.runninghub.cn/api/comfyui/tasks", timeout=15000)
+                "https://www.runninghub.cn/api/comfyui/tasks",
+                headers=self._authorization_headers(),
+                timeout=15000,
+            )
         except Exception as exc:
             logger.debug("Session revocation probe failed: %s", str(exc)[:120])
             return False
@@ -761,6 +763,26 @@ class BrowserRunner:
             return _is_auth_rejection_text(probe.text()[:500])
         except Exception:
             return False
+
+    def _authorization_headers(self):
+        """Return the auth header used by RunningHub's frontend requests."""
+        token = ""
+        if self._page:
+            try:
+                token = self._page.evaluate(
+                    "() => localStorage.getItem('Rh-Accesstoken') || ''"
+                )
+            except Exception:
+                pass
+        if not token:
+            state = self._load_state() or {}
+            token = next((
+                item.get("value", "")
+                for origin in state.get("origins") or []
+                for item in origin.get("localStorage") or []
+                if item.get("name") == "Rh-Accesstoken"
+            ), "")
+        return {"Authorization": f"Bearer {token}"} if token else {}
 
     def _load_state(self):
         f = self.user_data_dir / "state.json"
@@ -786,6 +808,25 @@ class BrowserRunner:
         if not state:
             return
         cookies = state.get("cookies") or []
+        has_refresh_state = any(
+            entry.get("name") == "Rh-Refreshtoken" and entry.get("value")
+            for origin in state.get("origins") or []
+            for entry in origin.get("localStorage") or []
+            if isinstance(entry, dict)
+        )
+
+        storage_expiries = []
+        for origin in state.get("origins") or []:
+            for entry in origin.get("localStorage") or []:
+                if entry.get("name") not in ("Rh-Expire-In", "Rh-Comfy-Expire-In"):
+                    continue
+                try:
+                    expiry = float(entry.get("value", 0)) / 1000
+                except (TypeError, ValueError):
+                    continue
+                if expiry > time.time():
+                    storage_expiries.append(expiry)
+        storage_expiry = max(storage_expiries, default=0.0)
 
         def _jwt_expiry(value):
             """Return the JWT exp (unix seconds) if decodable and in future."""
@@ -825,7 +866,12 @@ class BrowserRunner:
                     # the login entirely; restore the real JWT lifetime.
                     if 0 < item["expires"] <= time.time():
                         recovered = _jwt_expiry(item["value"])
-                        item["expires"] = recovered if recovered else time.time() + 86400
+                        if not recovered and item["name"] == "Rh-Accesstoken":
+                            if has_refresh_state:
+                                continue
+                            recovered = storage_expiry
+                        if recovered:
+                            item["expires"] = recovered
                     if "url" in c and c["url"]:
                         item["url"] = c["url"]
                     cleaned.append(item)
@@ -843,6 +889,17 @@ class BrowserRunner:
                 ls = entry.get("localStorage") or []
                 if not origin or not ls:
                     continue
+                if has_refresh_state:
+                    cleaned_ls = []
+                    for item in ls:
+                        if item.get("name") in ("Rh-Expire-In", "Rh-Comfy-Expire-In"):
+                            try:
+                                if float(item.get("value", 0)) / 1000 <= time.time():
+                                    continue
+                            except (TypeError, ValueError):
+                                continue
+                        cleaned_ls.append(item)
+                    ls = cleaned_ls
                 pending.append({"origin": origin, "entries": ls})
             if pending:
                 payload = json.dumps(pending, ensure_ascii=False)
@@ -938,6 +995,30 @@ class BrowserRunner:
         logger.warning("Login not detected within %ds — session may be expired. "
                        "Please re-login via the account management page.", timeout)
         return False
+
+    def _restore_saved_login(self):
+        """Allow RunningHub to refresh a session restored from localStorage."""
+        if self.ensure_logged_in(timeout=0):
+            return True
+
+        state = self._load_state() or {}
+        local_names = {
+            item.get("name")
+            for origin in state.get("origins") or []
+            for item in origin.get("localStorage") or []
+            if isinstance(item, dict) and item.get("value")
+        }
+        if not local_names.intersection({"Rh-Accesstoken", "Rh-Refreshtoken"}):
+            return False
+
+        # Origin-scoped storage is restored by the init script during this
+        # navigation. RunningHub can then exchange it for a fresh cookie.
+        self._page.goto(
+            "https://www.runninghub.cn/",
+            wait_until="domcontentloaded",
+            timeout=60000,
+        )
+        return self.ensure_logged_in(timeout=60)
 
     # =================================================================
     # File Upload
@@ -2369,7 +2450,10 @@ class BrowserRunner:
                         add(outputData.imgs, values);
                         add(outputData.images, values);
                         add(outputData.videos, values);
+                        add(outputData.gifs, values);
                         add(outputData.audio, values);
+                        add(node && node.outputs, values);
+                        add(outputData.outputs, values);
                         snapshot[String(nodeId)] = [...new Set(values)].sort();
                     }
                     return snapshot;
@@ -2380,6 +2464,39 @@ class BrowserRunner:
         except Exception as exc:
             logger.debug("Output media snapshot failed: %s", str(exc)[:160])
             return {}
+
+    def _current_task_list_state(self):
+        """Return the newest visible RunningHub task-list status."""
+        if not self._page:
+            return None
+        script = r"""
+            () => {
+                const visible = (el) => {
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden'
+                        && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+                };
+                const matches = [];
+                for (const el of document.querySelectorAll('div, span, p')) {
+                    if (!visible(el)) continue;
+                    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                    let state = null;
+                    if (/^生成中(?:\s|\d|:)*$/.test(text) || /^生产中(?:\s|\d|:)*$/.test(text)) state = 'running';
+                    else if (/^排队中(?:\s|（|\(|第|\d|位|）|\))*$/.test(text)) state = 'queued';
+                    else if (text === '任务失败') state = 'failed';
+                    if (state) { const rect = el.getBoundingClientRect(); matches.push({state, text, top: rect.top, left: rect.left}); }
+                }
+                if (!matches.length) return null;
+                matches.sort((a, b) => a.top - b.top || a.left - b.left);
+                return matches[0];
+            }
+        """
+        try:
+            return self._page.evaluate(script)
+        except Exception as exc:
+            logger.debug("Task-list state check failed: %s", str(exc)[:120])
+            return None
 
     @staticmethod
     def _has_new_output_media(baseline, current):
@@ -2411,60 +2528,86 @@ class BrowserRunner:
                 return False
         return True
 
-    def _current_task_list_state(self):
-        """Return the status of the newest visible RunningHub task-list item.
-
-        The sidebar keeps older failed tasks visible while a new task is
-        running.  Looking for any ``任务失败`` text therefore produces false
-        failures.  Status labels are sorted by their screen position and only
-        the topmost (newest) visible item is considered.
-        """
-        if not self._page:
+    def _current_comfy_progress(self):
+        """Read the visible ComfyUI progress indicator from the workflow frame."""
+        if not self._comfy:
             return None
-
         script = r"""
             () => {
                 const visible = (el) => {
-                    const style = window.getComputedStyle(el);
+                    const style = getComputedStyle(el);
                     const rect = el.getBoundingClientRect();
-                    return style.display !== 'none'
-                        && style.visibility !== 'hidden'
+                    return style.display !== 'none' && style.visibility !== 'hidden'
                         && Number(style.opacity || 1) > 0
                         && rect.width > 0 && rect.height > 0;
                 };
-                const matches = [];
-                for (const el of document.querySelectorAll('div, span, p')) {
+                const percent = (value) => {
+                    const match = String(value || '').match(/(\d+(?:\.\d+)?)\s*%/);
+                    return match ? Number(match[1]) : null;
+                };
+                const candidates = [];
+                let idleVisible = false;
+                for (const el of document.querySelectorAll('*')) {
                     if (!visible(el)) continue;
                     const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-                    let state = null;
-                    if (/^生成中(?:\s|\d|:)*$/.test(text)
-                            || /^生产中(?:\s|\d|:)*$/.test(text)) {
-                        state = 'running';
-                    } else if (/^排队中(?:\s|（|\(|第|\d|位|）|\))*$/.test(text)) {
-                        state = 'queued';
-                    } else if (text === '任务失败') {
-                        state = 'failed';
+                    const textPercent = percent(text);
+                    const stylePercent = percent(el.getAttribute('style') || '');
+                    if (/^idle$/i.test(text)) {
+                        idleVisible = true;
+                    } else if (textPercent !== null) {
+                        const hint = `${el.getAttribute('role') || ''} ${el.className || ''}`.toLowerCase();
+                        if (/progress|percent|进度|进程|valuenow/.test(hint)
+                            || /\(\s*\d+(?:\.\d+)?\s*%\s*\)/.test(text)) {
+                            candidates.push({percent: textPercent, source: 'text', score: 2, text: text.slice(0, 120)});
+                        }
+                    } else if (stylePercent !== null) {
+                        const hint = `${el.getAttribute('role') || ''} ${el.className || ''}`.toLowerCase();
+                        if (/progress|percent|进度|进程|valuenow/.test(hint)) {
+                            candidates.push({percent: stylePercent, source: 'style', score: 2, text: text.slice(0, 120)});
+                        }
                     }
-                    if (!state) continue;
-                    const rect = el.getBoundingClientRect();
-                    matches.push({state, text, top: rect.top, left: rect.left});
                 }
-                if (!matches.length) return null;
-                matches.sort((a, b) => a.top - b.top || a.left - b.left);
-                return matches[0];
+                const progress = window.app && window.app.progress;
+                if (progress && typeof progress.value === 'number') {
+                    const max = Number(progress.max || 100);
+                    if (max > 0) candidates.unshift({
+                        percent: Math.max(0, Math.min(100, progress.value / max * 100)),
+                        source: 'app.progress', text: ''
+                    });
+                }
+                if (!candidates.length) {
+                    return idleVisible ? {percent: 0, source: 'idle', text: 'Idle'} : null;
+                }
+                candidates.sort((a, b) => {
+                    if (a.source === 'app.progress') return -1;
+                    if (b.source === 'app.progress') return 1;
+                    return (b.score || 0) - (a.score || 0);
+                });
+                return candidates[0];
             }
         """
         try:
-            result = self._page.evaluate(script)
-            if result:
-                logger.debug(
-                    "Newest task-list state: %s (%s)",
-                    result.get("state"), result.get("text", ""),
-                )
-            return result
+            result = self._comfy.evaluate(script)
+            if isinstance(result, dict) and result.get("percent") is not None:
+                result["percent"] = max(0.0, min(100.0, float(result["percent"])))
+                logger.debug("ComfyUI progress: %.1f%% (%s)", result["percent"], result.get("source"))
+                return result
         except Exception as exc:
-            logger.debug("Task-list state check failed: %s", str(exc)[:120])
-            return None
+            logger.debug("ComfyUI progress check failed: %s", str(exc)[:120])
+        return None
+
+    def _cancel_for_retry(self, reason):
+        """Cancel the cloud task without marking it as a user cancellation."""
+        self._report_progress("retrying", reason)
+        try:
+            result = self._cancel_runninghub_task_from_sidebar()
+            logger.warning("Cancelled stalled RunningHub task for retry: %s", result)
+        except Exception as exc:
+            logger.warning("Failed to cancel stalled task before retry: %s", exc)
+        # The caller owns the retry loop.  Returning instead of raising is
+        # important here: a RuntimeError would escape the loop and prevent
+        # the configured retry attempts from being started.
+        return True
 
     @staticmethod
     def _observe_task_failure(task_list_state, first_seen_at, now,
@@ -2675,6 +2818,8 @@ class BrowserRunner:
             'button:has-text("Yes")', 'button:has-text("是")',
             '.ant-modal-close', '[aria-label="Close"]',
             '[aria-label="关闭"]',
+            '[aria-label="x"]', '[aria-label="X"]',
+            '[title="关闭"]', '[title="Close"]',
         ]
         # Main page
         for sel in button_selectors:
@@ -2721,6 +2866,46 @@ class BrowserRunner:
                             self._page.wait_for_timeout(500)
                 except Exception:
                     pass
+
+        # Last-resort close-X fallback for account-expiry/announcement
+        # dialogs whose close control is a plain div/span and therefore does
+        # not match the semantic button selectors above.  Restrict the search
+        # to dialog-like or fixed overlays so task-card controls are ignored.
+        close_x_script = r"""() => {
+            const visible = (el) => {
+                const s = getComputedStyle(el), r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden'
+                    && Number(s.opacity || 1) > 0 && r.width > 0 && r.height > 0;
+            };
+            const isDialog = (el) => {
+                for (let p = el.parentElement, i = 0; p && i < 8; p = p.parentElement, i++) {
+                    const s = getComputedStyle(p), c = String(p.className || '').toLowerCase();
+                    const role = (p.getAttribute('role') || '').toLowerCase();
+                    if (role === 'dialog' || /modal|dialog|popup|overlay/.test(c)
+                        || (s.position === 'fixed' && p.getBoundingClientRect().width >= innerWidth * .25)) return true;
+                    i++;
+                }
+                return false;
+            };
+            for (const el of document.querySelectorAll('[aria-label], [title], button, a, span, div')) {
+                if (!visible(el) || !isDialog(el)) continue;
+                const label = ((el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '') + '').trim();
+                if (!/^(x|×|关闭|close)$/i.test(label)) continue;
+                el.click();
+                return true;
+            }
+            return false;
+        }"""
+        for scope_name, scope in (("main", self._page), ("comfy", self._comfy)):
+            if not scope:
+                continue
+            try:
+                if scope.evaluate(close_x_script):
+                    logger.info("Dismissed popup via generic close X (%s)", scope_name)
+                    self._page.wait_for_timeout(300)
+                    break
+            except Exception:
+                pass
 
     def _dismiss_stale_completion_popup(self):
         """Clear a leftover final-report dialog before configuring a run.
@@ -3221,11 +3406,11 @@ class BrowserRunner:
                             src: safeSrc.slice(0, 300)};
                     });
                     return {nodeExists: !!node, nodeType: node && node.type || null,
-                        nodeKeys: node ? Object.keys(node).filter((key) => /img|image|output|preview/i.test(key)).slice(0, 80) : [],
+                        nodeKeys: node ? Object.keys(node).filter((key) => /img|image|output|preview|video|gif|audio/i.test(key)).slice(0, 80) : [],
                         nodeImgs: summarize(node && node.imgs),
                         nodeImages: Array.isArray(node && node.images) ? node.images : [],
                         nodeImageRects: Array.isArray(node && node.imageRects) ? node.imageRects.length : 0,
-                        outputKeys: Object.keys(outputData || {}).filter((key) => /img|image|output|preview/i.test(key)).slice(0, 80),
+                        outputKeys: Object.keys(outputData || {}).filter((key) => /img|image|output|preview|video|gif|audio/i.test(key)).slice(0, 80),
                         outputImgs: summarize(outputData && outputData.imgs),
                         outputImages: Array.isArray(outputData && outputData.images) ? outputData.images : []};
                 }""",
@@ -3375,10 +3560,16 @@ class BrowserRunner:
                 const videoMetadata = [
                     ...(Array.isArray(node.videos) ? node.videos : []),
                     ...(Array.isArray(outputData.videos) ? outputData.videos : []),
+                    ...(Array.isArray(node.gifs) ? node.gifs : []),
+                    ...(Array.isArray(outputData.gifs) ? outputData.gifs : []),
+                    ...(Array.isArray(node.outputs) ? node.outputs : []),
+                    ...(Array.isArray(outputData.outputs) ? outputData.outputs : []),
                 ];
                 for (const item of videoMetadata) {
                     if (!item) continue;
                     if (typeof item === 'string') { urls.push(item); continue; }
+                    if (item.url) urls.push(String(item.url));
+                    if (item.src) urls.push(String(item.src));
                     if (item.cos_url) urls.push(String(item.cos_url));
                     if (item.filename) urls.push(viewFor(item));
                 }
@@ -3823,8 +4014,8 @@ class BrowserRunner:
             max_retries = 3
             attempt = 0
             status = None
-            # Exclude page loading, uploads and account queue time.
-            execution_started_at = None
+            # Exclude page loading and uploads. Each retry gets its own
+            # execution budget; queue time is handled separately below.
             execution_limit = min(max(1, int(timeout or 600)), 60 * 60)
 
             while attempt <= max_retries:
@@ -3847,9 +4038,11 @@ class BrowserRunner:
                     if not self.select_plus_mode():
                         raise RuntimeError("未找到 Plus 模式运行按钮")
 
-                if execution_started_at is None:
-                    execution_started_at = time.monotonic()
-                    logger.info("Workflow execution timer started (limit=%ds)", execution_limit)
+                execution_started_at = time.monotonic()
+                logger.info(
+                    "Workflow execution timer started for attempt %d (limit=%ds)",
+                    attempt, execution_limit,
+                )
 
                 # Click a blank area to defocus / close any open popups
                 self._page.mouse.click(10, 450)
@@ -3865,6 +4058,7 @@ class BrowserRunner:
                 queue_last_seen_at = None
                 last_task_state = None
                 last_popup_sweep = time.monotonic()
+                zero_progress_since = None
                 while time.monotonic() < deadline or last_task_state == "queued":
                     self._raise_if_cancelled()
                     self._dismiss_cancel_popups()
@@ -3904,10 +4098,41 @@ class BrowserRunner:
                     # Output presence must always be checked before the task
                     # list: RunningHub can show "任务失败" in the sidebar even
                     # after a workflow has completed.
+                    now_monotonic = time.monotonic()
+                    # The authoritative progress is rendered inside the
+                    # left ComfyUI canvas. The right task list is only a
+                    # coarse queue/failure signal and may lag or be absent.
+                    progress = self._current_comfy_progress()
                     task_list_state = self._current_task_list_state()
                     task_state = (task_list_state or {}).get("state")
+                    if (progress is not None
+                            and progress.get("percent", 0) > 0
+                            and task_state == "queued"):
+                        # The right sidebar can lag behind the actual node
+                        # execution. Once the left canvas reports progress,
+                        # do not let stale "queued" text overwrite it.
+                        task_state = "running"
                     last_task_state = task_state
-                    now_monotonic = time.monotonic()
+                    if task_state == "running" and progress is not None:
+                        if progress.get("percent", 0) <= 0:
+                            zero_progress_since = zero_progress_since or now_monotonic
+                            zero_elapsed = now_monotonic - zero_progress_since
+                            self._report_progress(
+                                "running_workflow",
+                                f"工作流进度 0%（已持续 {int(zero_elapsed)} 秒）",
+                            )
+                            if zero_elapsed >= self.ZERO_PROGRESS_TIMEOUT_SECONDS:
+                                self._cancel_for_retry(
+                                    "工作流进度持续为 0%，已取消并准备重试"
+                                )
+                                # Leave this attempt and let the outer retry
+                                # loop submit the same workflow again.
+                                status = None
+                                break
+                        else:
+                            zero_progress_since = None
+                    elif task_state != "queued":
+                        zero_progress_since = None
                     if task_state == "queued":
                         # RunningHub's own capacity queue is not workflow
                         # execution time. Extend the deadline for every period
@@ -3967,6 +4192,15 @@ class BrowserRunner:
                             )
                         raise RuntimeError(
                             "RunningHub 任务列表持续显示任务失败，且目标输出节点没有新结果"
+                        )
+
+                    # Publish left-canvas progress after processing the right
+                    # sidebar so its coarse status cannot overwrite the
+                    # percentage shown in the client task table.
+                    if progress is not None:
+                        self._report_progress(
+                            "running_workflow",
+                            f"工作流进度 {progress['percent']:.0f}%",
                         )
 
                     # Check for error popups
